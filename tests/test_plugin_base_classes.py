@@ -517,6 +517,37 @@ class PluginBaseConfigTest(unittest.TestCase):
         self.assertEqual(webui_schema["sections"]["settings"]["fields"]["mode"]["ui_type"], "select")
         self.assertEqual(webui_schema["layout"]["type"], "tabs")
 
+    def test_plugin_base_exposes_manifest_v2_urls_in_runtime_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            plugin_dir = Path(tmp_dir)
+            manifest = {
+                "manifest_version": 2,
+                "id": "github.alice.sample-plugin",
+                "name": "Sample Plugin",
+                "version": "1.2.3",
+                "description": "Sample plugin for unit tests",
+                "author": {"name": "Alice", "url": "https://example.com/alice"},
+                "license": "MIT",
+                "urls": {
+                    "repository": "https://example.com/alice/sample-plugin",
+                    "homepage": "https://example.com/sample-plugin",
+                },
+                "host_application": {"min_version": "0.14.0"},
+                "sdk": {"min_version": "1.0.0", "max_version": "1.99.99"},
+                "entrypoint": "plugin.py",
+                "capabilities": [],
+                "i18n": {"default_locale": "zh-CN", "supported_locales": ["zh-CN"]},
+            }
+            (plugin_dir / "_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+            plugin = ConcreteConfigPlugin(str(plugin_dir))
+
+        self.assertEqual(plugin.plugin_info.homepage_url, "https://example.com/sample-plugin")
+        self.assertEqual(
+            plugin.plugin_info.repository_url,
+            "https://example.com/alice/sample-plugin",
+        )
+
     def test_plugin_base_handles_no_schema_unsupported_config_and_schema_edges(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             plugin_dir = Path(tmp_dir)

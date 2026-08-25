@@ -547,7 +547,7 @@ export function Layout({ children }: LayoutProps) {
               </button>
             </div>
 
-            <div className="pointer-events-none absolute inset-x-16 flex justify-center lg:hidden">
+            <div className="pointer-events-none flex min-w-0 flex-1 justify-center lg:hidden">
               <span className="truncate text-[17px] font-semibold leading-6 text-foreground">
                 {APP_NAME}
               </span>

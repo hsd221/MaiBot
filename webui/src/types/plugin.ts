@@ -46,6 +46,29 @@ export interface PluginManifest {
   locales_path?: string
 }
 
+export interface PluginMarketVersion {
+  version: string
+  ref: string
+  commit: string
+  status: 'approved' | 'yanked' | 'blocked'
+  released_at: string
+  stable: boolean
+  installable: boolean
+  host_application: HostApplication
+}
+
+export type PluginMarketStatus = 'approved' | 'yanked' | 'blocked'
+
+export interface PluginInstallationInfo {
+  install_method: 'market' | 'git' | 'upload' | 'local'
+  installed_version: string
+  registry_url: string | null
+  repository_url: string | null
+  source_ref: string | null
+  source_commit: string | null
+  updated_at: string
+}
+
 /**
  * 插件信息（用于市场展示）
  * 包含 manifest 信息和额外的统计数据
@@ -75,6 +98,18 @@ export interface PluginInfo {
   screenshots?: string[]
   /** 更新日志 */
   changelog?: string
+  /** 市场审核级别 */
+  review_level?: 'community' | 'official'
+  /** Registry 中的插件状态 */
+  market_status?: PluginMarketStatus
+  /** 提供当前市场元数据的 Registry */
+  market_registry_url?: string
+  /** Registry 中的已审核版本 */
+  market_versions?: PluginMarketVersion[]
+  /** 本地安装来源 */
+  installation?: PluginInstallationInfo | null
+  /** 插件声明的能力 */
+  capabilities?: string[]
 }
 
 /**

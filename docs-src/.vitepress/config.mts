@@ -34,6 +34,7 @@ export default withMermaid(
               { text: '源码安装', link: '/guide/installation' },
               { text: 'Docker 安装', link: '/guide/docker-installation' },
               { text: '配置说明', link: '/guide/configuration' },
+              { text: '插件市场', link: '/guide/plugin-market' },
               { text: '部署指南', link: '/guide/deployment' },
               { text: '架构概览', link: '/guide/architecture' },
             ],

@@ -38,6 +38,10 @@ class ConfigRuntimeHelpersTest(unittest.TestCase):
         self.assertEqual(bot_document["bot"]["nickname"], "璃夜")
         self.assertEqual(bot_document["chat"]["max_context_size"], 30)
         self.assertEqual(bot_document["update"]["channel"], "stable")
+        self.assertEqual(
+            bot_document["webui"]["plugin_registry_url"],
+            "https://raw.githubusercontent.com/hsd221/RiyaBot-Plugins-Registry/main/registry.json",
+        )
         self.assertNotIn("dream", bot_document)
         self.assertEqual(model_document["api_providers"], [])
         self.assertEqual(model_document["models"], [])

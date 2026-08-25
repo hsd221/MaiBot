@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# RiyaBot & NapCat Adapter一键安装脚本 by Cookie_987
+# RiyaBot 与外部 OneBot/NapCat 插件一键安装脚本 by Cookie_987
 # 适用于Arch/Ubuntu 24.10/Debian 12/CentOS 9
 # 请小心使用任何一键脚本！
 
-INSTALLER_VERSION="0.0.5-riyabot"
+INSTALLER_VERSION="0.0.6-riyabot"
 LANG=C.UTF-8
 
 # 如无法访问GitHub请修改此处镜像地址
@@ -31,7 +31,6 @@ DEFAULT_INSTALL_DIR="/opt/riyabot"
 # 服务名称
 SERVICE_NAME="riyabot"
 SERVICE_NAME_WEB="riyabot-web"
-SERVICE_NAME_NBADAPTER="riyabot-napcat-adapter"
 
 IS_INSTALL_NAPCAT=false
 IS_INSTALL_DEPENDENCIES=false
@@ -54,16 +53,13 @@ load_install_info() {
 # 显示管理菜单
 show_menu() {
     while true; do
-        choice=$(whiptail --title "RiyaBot管理菜单" --menu "请选择要执行的操作：" 15 60 7 \
+        choice=$(whiptail --title "RiyaBot管理菜单" --menu "请选择要执行的操作：" 15 60 6 \
             "1" "启动RiyaBot" \
             "2" "停止RiyaBot" \
             "3" "重启RiyaBot" \
-            "4" "启动NapCat Adapter" \
-            "5" "停止NapCat Adapter" \
-            "6" "重启NapCat Adapter" \
-            "7" "拉取最新RiyaBot仓库" \
-            "8" "切换分支" \
-            "9" "退出" 3>&1 1>&2 2>&3)
+            "4" "拉取最新RiyaBot仓库" \
+            "5" "切换分支" \
+            "6" "退出" 3>&1 1>&2 2>&3)
 
         [[ $? -ne 0 ]] && exit 0
 
@@ -81,24 +77,12 @@ show_menu() {
                 whiptail --msgbox "🔄RiyaBot已重启" 10 60
                 ;;
             4)
-                systemctl start ${SERVICE_NAME_NBADAPTER}
-                whiptail --msgbox "✅NapCat Adapter已启动" 10 60
-                ;;
-            5)
-                systemctl stop ${SERVICE_NAME_NBADAPTER}
-                whiptail --msgbox "🛑NapCat Adapter已停止" 10 60
-                ;;
-            6)
-                systemctl restart ${SERVICE_NAME_NBADAPTER}
-                whiptail --msgbox "🔄NapCat Adapter已重启" 10 60
-                ;;
-            7)
                 update_dependencies
                 ;;
-            8)
+            5)
                 switch_branch
                 ;;
-            9)
+            6)
                 exit 0
                 ;;
             *)
@@ -386,7 +370,7 @@ run_installation() {
     # 确认安装
     confirm_install() {
         local confirm_msg="请确认以下更改：\n\n"
-        confirm_msg+="📂 安装RiyaBot、NapCat Adapter到: $INSTALL_DIR\n"
+        confirm_msg+="📂 安装RiyaBot与外部OneBot/NapCat插件到: $INSTALL_DIR\n"
         confirm_msg+="🔀 分支: $BRANCH\n"
         [[ $IS_INSTALL_DEPENDENCIES == true ]] && confirm_msg+="📦 安装依赖：${missing_packages[@]}\n"
         [[ $IS_INSTALL_NAPCAT == true ]] && confirm_msg+="📦 安装额外组件：\n"
@@ -434,15 +418,9 @@ run_installation() {
         exit 1
     }
 
-    echo -e "${GREEN}克隆 maim_message 包仓库...${RESET}"
-    git clone $GITHUB_REPO/MaiM-with-u/maim_message.git || {
-        echo -e "${RED}克隆 maim_message 包仓库失败！${RESET}"
-        exit 1
-    }
-
-    echo -e "${GREEN}克隆 RiyaBot NapCat Adapter...${RESET}"
-    git clone "$GITHUB_REPO/Mai-with-u/MaiBot-Napcat-Adapter.git" RiyaBot-NapCat-Adapter || {
-        echo -e "${RED}克隆 RiyaBot-NapCat-Adapter 仓库失败！${RESET}"
+    echo -e "${GREEN}克隆 RiyaBot OneBot/NapCat 外部插件...${RESET}"
+    git clone "$GITHUB_REPO/hsd221/riyabot-plugin-onebot-adapter.git" RiyaBot/plugins/onebot_adapter || {
+        echo -e "${RED}克隆 RiyaBot OneBot/NapCat 外部插件仓库失败！${RESET}"
         exit 1
     }
 
@@ -452,16 +430,6 @@ run_installation() {
     cd RiyaBot
     pip install uv
     uv pip install -i https://mirrors.aliyun.com/pypi/simple -r requirements.txt   
-    cd ..
-
-    echo -e "${GREEN}安装maim_message依赖...${RESET}"
-    cd maim_message
-    uv pip install -i https://mirrors.aliyun.com/pypi/simple -e .
-    cd ..
-
-    echo -e "${GREEN}部署RiyaBot NapCat Adapter...${RESET}"
-    cd RiyaBot-NapCat-Adapter
-    uv pip install -i https://mirrors.aliyun.com/pypi/simple -r requirements.txt
     cd ..
 
     echo -e "${GREEN}同意协议...${RESET}"
@@ -479,7 +447,7 @@ run_installation() {
     cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=RiyaBot
-After=network.target ${SERVICE_NAME_NBADAPTER}.service
+After=network.target
 
 [Service]
 Type=simple
@@ -508,22 +476,6 @@ EOF
 # WantedBy=multi-user.target
 # EOF
 
-    cat > /etc/systemd/system/${SERVICE_NAME_NBADAPTER}.service <<EOF
-[Unit]
-Description=RiyaBot NapCat Adapter
-After=network.target mongod.service ${SERVICE_NAME}.service
-
-[Service]
-Type=simple
-WorkingDirectory=${INSTALL_DIR}/RiyaBot-NapCat-Adapter
-ExecStart=$INSTALL_DIR/venv/bin/python3 main.py
-Restart=always
-RestartSec=10s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
     systemctl daemon-reload
 
     # 保存安装信息
@@ -531,7 +483,7 @@ EOF
     echo "INSTALL_DIR=${INSTALL_DIR}" >> /etc/riyabot_install.conf
     echo "BRANCH=${BRANCH}" >> /etc/riyabot_install.conf
 
-    whiptail --title "🎉 安装完成" --msgbox "RiyaBot安装完成！\n已创建系统服务：${SERVICE_NAME}、${SERVICE_NAME_WEB}、${SERVICE_NAME_NBADAPTER}\n\n使用以下命令管理服务：\n启动服务：systemctl start ${SERVICE_NAME}\n查看状态：systemctl status ${SERVICE_NAME}" 14 60
+    whiptail --title "🎉 安装完成" --msgbox "RiyaBot安装完成！\n已创建系统服务：${SERVICE_NAME}\nOneBot/NapCat适配器将由外部插件随RiyaBot启动和停止。\n\n使用以下命令管理服务：\n启动服务：systemctl start ${SERVICE_NAME}\n查看状态：systemctl status ${SERVICE_NAME}" 14 60
 }
 
 # ----------- 主执行流程 -----------

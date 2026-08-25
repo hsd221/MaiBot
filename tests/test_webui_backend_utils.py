@@ -608,6 +608,36 @@ class GitMirrorServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(addresses, ("127.0.0.1",))
 
+    async def test_outbound_url_validation_accepts_proxy_fake_ip_only_for_built_in_public_git_hosts(self) -> None:
+        fake_ip_answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.37", 443))]
+        mixed_answer = [
+            *fake_ip_answer,
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
+        ]
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(git_mirror_service.socket, "getaddrinfo", return_value=fake_ip_answer),
+        ):
+            for host in ("raw.githubusercontent.com", "github.com", "gh-proxy.org"):
+                with self.subTest(host=host):
+                    self.assertEqual(
+                        await git_mirror_service.validate_outbound_host(host, 443),
+                        ("198.18.0.37",),
+                    )
+
+            with self.assertRaisesRegex(ValueError, "私有或本地地址"):
+                await git_mirror_service.validate_outbound_host("internal.example", 443)
+            with self.assertRaisesRegex(ValueError, "私有或本地地址"):
+                await git_mirror_service.validate_outbound_host("github.com", 8443)
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(git_mirror_service.socket, "getaddrinfo", return_value=mixed_answer),
+            self.assertRaisesRegex(ValueError, "私有或本地地址"),
+        ):
+            await git_mirror_service.validate_outbound_host("raw.githubusercontent.com", 443)
+
     async def test_raw_fetch_pins_the_validated_dns_address(self) -> None:
         requests = []
 
@@ -798,6 +828,64 @@ class GitMirrorServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("http.proxy=", run.call_args.args[0])
         self.assertEqual(run.call_args.kwargs["env"]["HTTPS_PROXY"], "http://proxy.example:8080")
+
+    async def test_clone_resolves_head_and_rejects_registry_commit_mismatch(self) -> None:
+        service = git_mirror_service.GitMirrorService(
+            max_retries=1, config=SimpleNamespace(get_enabled_mirrors=Mock(return_value=[]))
+        )
+        public_answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+        expected_commit = "a" * 40
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target_path = Path(tmp_dir) / "repo"
+
+            def successful_git(command, **kwargs):
+                if "clone" in command:
+                    target_path.mkdir()
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                return SimpleNamespace(returncode=0, stdout=f"{expected_commit}\n", stderr="")
+
+            with (
+                patch.object(git_mirror_service.socket, "getaddrinfo", return_value=public_answer),
+                patch.object(git_mirror_service.subprocess, "run", side_effect=successful_git) as run,
+            ):
+                result = await service._clone_with_url(
+                    "https://example.com/owner/repo.git",
+                    target_path,
+                    "v1.2.3",
+                    1,
+                    "custom",
+                    expected_commit=expected_commit,
+                )
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["commit"], expected_commit)
+            self.assertEqual(run.call_count, 2)
+
+            mismatch_path = Path(tmp_dir) / "mismatch"
+
+            def mismatched_git(command, **kwargs):
+                if "clone" in command:
+                    mismatch_path.mkdir()
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                return SimpleNamespace(returncode=0, stdout=f"{'b' * 40}\n", stderr="")
+
+            with (
+                patch.object(git_mirror_service.socket, "getaddrinfo", return_value=public_answer),
+                patch.object(git_mirror_service.subprocess, "run", side_effect=mismatched_git),
+            ):
+                mismatch = await service._clone_with_url(
+                    "https://example.com/owner/repo.git",
+                    mismatch_path,
+                    "v1.2.3",
+                    1,
+                    "custom",
+                    expected_commit=expected_commit,
+                )
+
+            self.assertFalse(mismatch["success"])
+            self.assertEqual(mismatch["error"], "仓库提交与审核记录不一致")
+            self.assertFalse(mismatch_path.exists())
 
     def test_git_mirror_config_loads_defaults_preserves_existing_file_and_manages_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

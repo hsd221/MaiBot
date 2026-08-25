@@ -17,6 +17,7 @@ from src.config.official_configs import (
     MemoryConfig,
     MessageReceiveConfig,
     PersonalityConfig,
+    WebUIConfig,
 )
 
 
@@ -249,6 +250,14 @@ class ApiAdaConfigTest(unittest.TestCase):
 
 
 class OfficialConfigTest(unittest.TestCase):
+    def test_webui_config_has_a_single_backend_managed_plugin_registry(self) -> None:
+        config = WebUIConfig()
+
+        self.assertEqual(
+            config.plugin_registry_url,
+            "https://raw.githubusercontent.com/hsd221/RiyaBot-Plugins-Registry/main/registry.json",
+        )
+
     def test_message_receive_config_from_dict_converts_lists_to_sets(self) -> None:
         config = MessageReceiveConfig.from_dict({"ban_words": ["bad", "bad"], "ban_msgs_regex": ["^spam"]})
 

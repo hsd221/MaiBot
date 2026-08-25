@@ -1,5 +1,16 @@
 import { fetchWithAuth, getAuthHeaders } from '@/lib/fetch-with-auth'
-import type { PluginInfo } from '@/types/plugin'
+import { isPluginCompatible } from './plugin-market-ui'
+import type { MaimaiVersion } from './plugin-market-ui'
+import type {
+  HostApplication,
+  PluginInfo,
+  PluginInstallationInfo,
+  PluginMarketStatus,
+  PluginMarketVersion,
+} from '@/types/plugin'
+
+export { isPluginCompatible }
+export type { MaimaiVersion }
 
 /**
  * Git 安装状态
@@ -9,16 +20,6 @@ export interface GitStatus {
   version?: string
   path?: string
   error?: string
-}
-
-/**
- * 麦麦版本信息
- */
-export interface MaimaiVersion {
-  version: string
-  version_major: number
-  version_minor: number
-  version_patch: number
 }
 
 /**
@@ -47,6 +48,7 @@ export interface InstalledPlugin {
     [key: string]: unknown // 允许其他字段
   }
   path: string
+  installation?: PluginInstallationInfo | null
 }
 
 /**
@@ -68,119 +70,186 @@ export interface PluginProgressConnection {
   disconnect: () => void
 }
 
-/**
- * 插件仓库配置
- */
-const PLUGIN_REPO_OWNER = 'Mai-with-u'
-const PLUGIN_REPO_NAME = 'plugin-repo'
-const PLUGIN_REPO_BRANCH = 'main'
-const PLUGIN_DETAILS_FILE = 'plugin_details.json'
-
-/**
- * 插件列表 API 响应类型（只包含我们需要的字段）
- */
-interface PluginApiResponse {
-  id: string
-  manifest: {
-    manifest_version: number
-    name: string
-    version: string
-    description: string
-    author: {
-      name: string
-      url?: string
-    }
-    license: string
-    host_application: {
-      min_version: string
-      max_version?: string
-    }
-    homepage_url?: string
-    repository_url?: string
-    keywords: string[]
-    categories?: string[]
-    default_locale: string
-    locales_path?: string
-  }
-  // 可能还有其他字段，但我们不关心
-  [key: string]: unknown
+interface PluginMarketCompatibilityResponse {
+  min_version: string
+  max_version: string | null
 }
 
-/**
- * 从远程获取插件列表（通过后端代理避免 CORS）
- */
-export async function fetchPluginList(): Promise<PluginInfo[]> {
-  try {
-    // 通过后端 API 获取 Raw 文件
-    const response = await fetchWithAuth('/api/webui/plugins/fetch-raw', {
-      method: 'POST',
+interface PluginMarketVersionResponse {
+  version: string
+  ref: string
+  commit: string
+  status: 'approved' | 'yanked' | 'blocked'
+  released_at: string
+  stable: boolean
+  installable: boolean
+  host_application: PluginMarketCompatibilityResponse
+}
 
-      body: JSON.stringify({
-        owner: PLUGIN_REPO_OWNER,
-        repo: PLUGIN_REPO_NAME,
-        branch: PLUGIN_REPO_BRANCH,
-        file_path: PLUGIN_DETAILS_FILE,
-      }),
-    })
+type PluginMarketInstallationResponse = PluginInstallationInfo
 
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`)
-    }
+interface PluginMarketItemResponse {
+  id: string
+  name: string
+  description: string
+  author: { name: string; url: string | null }
+  license: string
+  repository_url: string
+  homepage_url: string | null
+  status: PluginMarketStatus
+  review_level: 'community' | 'official'
+  updated_at: string
+  capabilities: string[]
+  categories: string[]
+  keywords: string[]
+  host_application: PluginMarketCompatibilityResponse
+  latest_version: string | null
+  versions: PluginMarketVersionResponse[]
+  installation: PluginMarketInstallationResponse | null
+}
 
-    const result = await response.json()
+interface PluginMarketRegistryResponse {
+  name: string
+  url: string
+  repository_url: string
+  fetched_at: string
+}
 
-    // 检查后端返回的结果
-    if (!result.success || !result.data) {
-      throw new Error(result.error || '获取插件列表失败')
-    }
-
-    const data: PluginApiResponse[] = JSON.parse(result.data)
-
-    // 转换为 PluginInfo 格式，并过滤掉无效数据
-    const pluginList = data
-      .filter((item) => {
-        // 验证必需字段
-        if (!item?.id || !item?.manifest) {
-          console.warn('跳过无效插件数据:', item)
-          return false
-        }
-        if (!item.manifest.name || !item.manifest.version) {
-          console.warn('跳过缺少必需字段的插件:', item.id)
-          return false
-        }
-        return true
-      })
-      .map((item) => ({
-        id: item.id,
-        manifest: {
-          manifest_version: item.manifest.manifest_version || 1,
-          name: item.manifest.name,
-          version: item.manifest.version,
-          description: item.manifest.description || '',
-          author: item.manifest.author || { name: 'Unknown' },
-          license: item.manifest.license || 'Unknown',
-          host_application: item.manifest.host_application || { min_version: '0.0.0' },
-          homepage_url: item.manifest.homepage_url,
-          repository_url: item.manifest.repository_url,
-          keywords: item.manifest.keywords || [],
-          categories: item.manifest.categories || [],
-          default_locale: item.manifest.default_locale || 'zh-CN',
-          locales_path: item.manifest.locales_path,
-        },
-        // 默认值，这些信息可能需要从其他 API 获取
-        downloads: 0,
-        rating: 0,
-        review_count: 0,
-        installed: false,
-        published_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }))
-
-    return pluginList
-  } catch (error) {
-    console.error('Failed to fetch plugin list:', error)
-    throw error
+interface PluginMarketResponse {
+  registry: PluginMarketRegistryResponse
+  plugins: PluginMarketItemResponse[]
+  pagination: {
+    page: number
+    page_size: number
+    total: number
+    total_pages: number
   }
+}
+
+interface PluginMarketDetailResponse {
+  registry: PluginMarketRegistryResponse
+  plugin: PluginMarketItemResponse
+}
+
+const MARKET_PAGE_SIZE = 200
+const MAX_MARKET_PAGES = 50
+
+function normalizeHostCompatibility(value: PluginMarketCompatibilityResponse): HostApplication {
+  return {
+    min_version: value.min_version,
+    ...(value.max_version ? { max_version: value.max_version } : {}),
+  }
+}
+
+function mapMarketVersion(version: PluginMarketVersionResponse): PluginMarketVersion {
+  return {
+    ...version,
+    host_application: normalizeHostCompatibility(version.host_application),
+  }
+}
+
+function mapMarketPlugin(item: PluginMarketItemResponse, registryUrl: string): PluginInfo {
+  const displayedVersion = item.latest_version ?? item.versions[0]?.version ?? 'unknown'
+  const publishedAt = item.versions[item.versions.length - 1]?.released_at ?? item.updated_at
+  return {
+    id: item.id,
+    manifest: {
+      manifest_version: 2,
+      name: item.name,
+      version: displayedVersion,
+      description: item.description,
+      author: { name: item.author.name, ...(item.author.url ? { url: item.author.url } : {}) },
+      license: item.license,
+      host_application: normalizeHostCompatibility(item.host_application),
+      ...(item.homepage_url ? { homepage_url: item.homepage_url } : {}),
+      repository_url: item.repository_url,
+      keywords: item.keywords,
+      categories: item.categories,
+      default_locale: 'zh-CN',
+    },
+    downloads: 0,
+    rating: 0,
+    review_count: 0,
+    installed: item.installation !== null,
+    ...(item.installation ? { installed_version: item.installation.installed_version } : {}),
+    published_at: publishedAt,
+    updated_at: item.updated_at,
+    review_level: item.review_level,
+    market_status: item.status,
+    market_registry_url: registryUrl,
+    market_versions: item.versions.map(mapMarketVersion),
+    installation: item.installation,
+    capabilities: item.capabilities,
+  }
+}
+
+async function fetchMarketPage(page: number): Promise<PluginMarketResponse> {
+  const response = await fetchWithAuth(
+    `/api/webui/plugins/market?page=${page}&page_size=${MARKET_PAGE_SIZE}`
+  )
+  if (!response.ok) {
+    const error = (await response.json().catch(() => null)) as { detail?: string } | null
+    throw new Error(error?.detail || `插件市场请求失败 (${response.status})`)
+  }
+  const result = (await response.json()) as PluginMarketResponse
+  if (
+    !Array.isArray(result.plugins) ||
+    !result.pagination ||
+    !result.registry ||
+    typeof result.registry.url !== 'string' ||
+    typeof result.registry.fetched_at !== 'string'
+  ) {
+    throw new Error('插件市场响应格式无效')
+  }
+  return result
+}
+
+/** Load the validated projection exposed by the configured backend Registry. */
+export async function fetchPluginList(): Promise<PluginInfo[]> {
+  const firstPage = await fetchMarketPage(1)
+  const totalPages = firstPage.pagination.total_pages
+  if (!Number.isInteger(totalPages) || totalPages < 0 || totalPages > MAX_MARKET_PAGES) {
+    throw new Error('插件市场分页信息无效')
+  }
+  const pages = [firstPage]
+  for (let page = 2; page <= totalPages; page += 1) {
+    const nextPage = await fetchMarketPage(page)
+    if (
+      nextPage.registry.url !== firstPage.registry.url ||
+      nextPage.registry.fetched_at !== firstPage.registry.fetched_at ||
+      nextPage.pagination.page !== page ||
+      nextPage.pagination.page_size !== firstPage.pagination.page_size ||
+      nextPage.pagination.total !== firstPage.pagination.total ||
+      nextPage.pagination.total_pages !== totalPages
+    ) {
+      throw new Error('插件市场分页快照不一致')
+    }
+    pages.push(nextPage)
+  }
+  return pages.flatMap((page) =>
+    page.plugins.map((plugin) => mapMarketPlugin(plugin, page.registry.url))
+  )
+}
+
+/** Load reviewed versions from the Registry bound to a verified local installation. */
+export async function getBoundMarketPlugin(pluginId: string): Promise<PluginInfo> {
+  const response = await fetchWithAuth(`/api/webui/plugins/market/${encodeURIComponent(pluginId)}`)
+  if (!response.ok) {
+    const error = (await response.json().catch(() => null)) as { detail?: string } | null
+    throw new Error(error?.detail || `绑定的插件市场请求失败 (${response.status})`)
+  }
+
+  const result = (await response.json()) as PluginMarketDetailResponse
+  if (
+    !result.registry ||
+    typeof result.registry.url !== 'string' ||
+    !result.plugin ||
+    typeof result.plugin.id !== 'string' ||
+    !Array.isArray(result.plugin.versions)
+  ) {
+    throw new Error('绑定的插件市场响应格式无效')
+  }
+  return mapMarketPlugin(result.plugin, result.registry.url)
 }
 
 /**
@@ -227,57 +296,6 @@ export async function getMaimaiVersion(): Promise<MaimaiVersion> {
       version_patch: 0,
     }
   }
-}
-
-/**
- * 比较版本号
- *
- * @param pluginMinVersion 插件要求的最小版本
- * @param pluginMaxVersion 插件要求的最大版本（可选）
- * @param maimaiVersion 麦麦当前版本
- * @returns true 表示兼容，false 表示不兼容
- */
-export function isPluginCompatible(
-  pluginMinVersion: string,
-  pluginMaxVersion: string | undefined,
-  maimaiVersion: MaimaiVersion
-): boolean {
-  // 解析插件最小版本
-  const minParts = pluginMinVersion.split('.').map((p) => parseInt(p) || 0)
-  const minMajor = minParts[0] || 0
-  const minMinor = minParts[1] || 0
-  const minPatch = minParts[2] || 0
-
-  // 检查最小版本
-  if (maimaiVersion.version_major < minMajor) return false
-  if (maimaiVersion.version_major === minMajor && maimaiVersion.version_minor < minMinor)
-    return false
-  if (
-    maimaiVersion.version_major === minMajor &&
-    maimaiVersion.version_minor === minMinor &&
-    maimaiVersion.version_patch < minPatch
-  )
-    return false
-
-  // 检查最大版本（如果有）
-  if (pluginMaxVersion) {
-    const maxParts = pluginMaxVersion.split('.').map((p) => parseInt(p) || 0)
-    const maxMajor = maxParts[0] || 0
-    const maxMinor = maxParts[1] || 0
-    const maxPatch = maxParts[2] || 0
-
-    if (maimaiVersion.version_major > maxMajor) return false
-    if (maimaiVersion.version_major === maxMajor && maimaiVersion.version_minor > maxMinor)
-      return false
-    if (
-      maimaiVersion.version_major === maxMajor &&
-      maimaiVersion.version_minor === maxMinor &&
-      maimaiVersion.version_patch > maxPatch
-    )
-      return false
-  }
-
-  return true
 }
 
 /**
@@ -363,23 +381,61 @@ export function connectPluginProgressWebSocket(
 /**
  * 获取已安装插件列表
  */
+async function fetchInstalledPlugins(): Promise<InstalledPlugin[]> {
+  const response = await fetchWithAuth('/api/webui/plugins/installed', {
+    headers: getAuthHeaders(),
+  })
+
+  if (!response.ok) {
+    throw new Error(`获取已安装插件列表失败 (${response.status})`)
+  }
+
+  const result = (await response.json()) as {
+    success?: boolean
+    message?: string
+    plugins?: unknown
+  }
+
+  if (!result.success) {
+    throw new Error(result.message || '获取已安装插件列表失败')
+  }
+  if (!Array.isArray(result.plugins)) {
+    throw new Error('已安装插件响应格式无效')
+  }
+
+  return result.plugins as InstalledPlugin[]
+}
+
+/** Load installed plugins without hiding backend or response-format failures. */
+export async function getInstalledPluginsStrict(): Promise<InstalledPlugin[]> {
+  return await fetchInstalledPlugins()
+}
+
+export interface PluginSources {
+  marketPlugins: PluginInfo[]
+  installedPlugins: InstalledPlugin[]
+  marketError: string | null
+}
+
+/** Keep local plugin management usable when the optional Registry is unavailable. */
+export async function fetchPluginSources(): Promise<PluginSources> {
+  const [market, installedPlugins] = await Promise.all([
+    fetchPluginList()
+      .then((marketPlugins) => ({ marketPlugins, marketError: null }))
+      .catch((error: unknown) => ({
+        marketPlugins: [],
+        marketError: error instanceof Error ? error.message : '插件市场暂时不可用',
+      })),
+    getInstalledPluginsStrict(),
+  ])
+
+  return { ...market, installedPlugins }
+}
+
+/** Load installed plugins with the legacy empty-list fallback used by the configuration page. */
 export async function getInstalledPlugins(): Promise<InstalledPlugin[]> {
   try {
-    const response = await fetchWithAuth('/api/webui/plugins/installed', {
-      headers: getAuthHeaders(),
-    })
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`)
-    }
-
-    const result = await response.json()
-
-    if (!result.success) {
-      throw new Error(result.message || '获取已安装插件列表失败')
-    }
-
-    return result.plugins || []
+    return await fetchInstalledPlugins()
   } catch (error) {
     console.error('Failed to get installed plugins:', error)
     return []
@@ -437,6 +493,24 @@ export async function installPlugin(
   return await response.json()
 }
 
+/** Install a version already approved by the backend-configured Registry. */
+export async function installMarketPlugin(
+  pluginId: string,
+  version: string
+): Promise<{ success: boolean; message: string }> {
+  const response = await fetchWithAuth('/api/webui/plugins/market/install', {
+    method: 'POST',
+    body: JSON.stringify({ plugin_id: pluginId, version }),
+  })
+
+  if (!response.ok) {
+    const error = (await response.json().catch(() => null)) as { detail?: string } | null
+    throw new Error(error?.detail || '市场插件安装失败')
+  }
+
+  return (await response.json()) as { success: boolean; message: string }
+}
+
 /**
  * 卸载插件
  */
@@ -483,6 +557,29 @@ export async function updatePlugin(
   }
 
   return await response.json()
+}
+
+/** Move a market installation to another reviewed version, including rollback. */
+export async function updateMarketPlugin(
+  pluginId: string,
+  version: string
+): Promise<{ success: boolean; message: string; old_version: string; new_version: string }> {
+  const response = await fetchWithAuth('/api/webui/plugins/market/update', {
+    method: 'POST',
+    body: JSON.stringify({ plugin_id: pluginId, version }),
+  })
+
+  if (!response.ok) {
+    const error = (await response.json().catch(() => null)) as { detail?: string } | null
+    throw new Error(error?.detail || '市场插件更新失败')
+  }
+
+  return (await response.json()) as {
+    success: boolean
+    message: string
+    old_version: string
+    new_version: string
+  }
 }
 
 // ============ 插件配置管理 ============

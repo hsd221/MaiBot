@@ -1059,6 +1059,32 @@ class ComponentToolPluginPersonApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertIs(plugin_register_api.register_plugin(DecoratedPlugin), DecoratedPlugin)
         self.assertEqual(missing_root_manager.plugin_classes, {})
 
+    def test_plugin_register_decorator_rejects_same_internal_name_from_another_directory(self) -> None:
+        manager_module = importlib.import_module("src.plugin_system.core.plugin_manager")
+        manager = SimpleNamespace(plugin_classes={}, plugin_paths={})
+
+        class FirstPlugin(BasePlugin):
+            plugin_name = "shared_plugin"
+            enable_plugin = True
+            dependencies = []
+            python_dependencies = []
+            config_file_name = ""
+            config_schema = {}
+
+            def get_plugin_components(self):
+                return []
+
+        class SecondPlugin(FirstPlugin):
+            pass
+
+        with patch.object(manager_module, "plugin_manager", manager):
+            plugin_register_api.register_plugin(FirstPlugin)
+            manager.plugin_paths["shared_plugin"] = "/different/plugin/path"
+            with self.assertRaisesRegex(ValueError, "已由其他插件目录注册"):
+                plugin_register_api.register_plugin(SecondPlugin)
+
+        self.assertIs(manager.plugin_classes["shared_plugin"], FirstPlugin)
+
     def test_tool_api_instantiates_tool_with_plugin_config_and_lists_definitions(self) -> None:
         class FakeTool:
             def __init__(self, plugin_config=None, chat_stream=None):

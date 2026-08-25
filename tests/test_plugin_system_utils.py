@@ -58,7 +58,10 @@ class VersionComparatorTest(unittest.TestCase):
         self.assertEqual(VersionComparator.normalize_version(""), "0.0.0")
         self.assertEqual(VersionComparator.normalize_version("1.2-snapshot.4"), "1.2.0")
         self.assertEqual(VersionComparator.normalize_version("0.14.0-dev.1"), "0.14.0")
+        self.assertEqual(VersionComparator.normalize_version("999.0.0-preview.1"), "999.0.0")
+        self.assertEqual(VersionComparator.normalize_version("1.2.3-preview.1+build.7"), "1.2.3")
         self.assertEqual(VersionComparator.normalize_version(" 2 "), "2.0.0")
+        self.assertEqual(VersionComparator.normalize_version("1.2.3-"), "0.0.0")
         self.assertEqual(VersionComparator.normalize_version("not-a-version"), "0.0.0")
 
     def test_compare_versions_uses_semantic_numeric_order(self) -> None:
@@ -133,7 +136,7 @@ class ManifestValidatorTest(unittest.TestCase):
     def test_manifest_validation_collects_required_field_and_nested_component_errors(self) -> None:
         validator = ManifestValidator()
         manifest = {
-            "manifest_version": 2,
+            "manifest_version": 3,
             "name": "",
             "version": "1.0.0",
             "description": "Missing author and invalid component",
@@ -152,6 +155,32 @@ class ManifestValidatorTest(unittest.TestCase):
         self.assertIn("keywords应为数组格式", errors)
         self.assertIn("plugin_info.components[0]缺少必需字段: name", errors)
         self.assertIn("作者URL建议使用完整的URL格式", warnings)
+
+    def test_manifest_v2_is_supported_without_weakening_v1_compatibility(self) -> None:
+        validator = ManifestValidator()
+        manifest = {
+            "manifest_version": 2,
+            "id": "github.alice.weather",
+            "name": "天气插件",
+            "version": "1.2.3",
+            "description": "查询天气信息",
+            "author": {"name": "Alice", "url": "https://github.com/alice"},
+            "license": "MIT",
+            "urls": {
+                "repository": "https://github.com/alice/riyabot-weather",
+                "homepage": "https://github.com/alice/riyabot-weather#readme",
+            },
+            "host_application": {"min_version": "0.14.0"},
+            "sdk": {"min_version": "1.0.0", "max_version": "1.99.99"},
+            "entrypoint": "plugin.py",
+            "capabilities": ["network"],
+            "i18n": {"default_locale": "zh-CN", "supported_locales": ["zh-CN"]},
+        }
+
+        with patch.object(VersionComparator, "get_current_host_version", return_value="0.14.1"):
+            self.assertTrue(validator.validate_manifest(manifest))
+
+        self.assertEqual(validator.validation_errors, [])
 
     def test_validation_state_is_reset_between_runs(self) -> None:
         validator = ManifestValidator()

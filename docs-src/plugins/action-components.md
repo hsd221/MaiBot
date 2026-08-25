@@ -50,7 +50,8 @@ class ExampleAction(BaseAction):
 
 ### associated_types：该 Action 会发送的消息类型
 
-例如文本、表情等，这部分由 Adapter 传递给处理器。以 RiyaBot-NapCat-Adapter 为例，可选项目如下：
+例如文本、表情等，这部分由 Adapter 传递给处理器。以独立维护的
+[OneBot/NapCat 适配器插件](https://github.com/hsd221/riyabot-plugin-onebot-adapter) 为例，可选项目如下：
 
 | 类型 | 说明 | 格式 |
 | --- | --- | --- |

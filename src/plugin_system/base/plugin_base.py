@@ -8,6 +8,7 @@ import shutil
 import datetime
 
 from src.common.logger import get_logger
+from src.plugin_system.marketplace import parse_json_document
 from src.plugin_system.base.component_types import (
     PluginInfo,
     PythonDependency,
@@ -93,6 +94,8 @@ class PluginBase(ABC):
         self.plugin_version = self.get_manifest_info("version", "1.0.0")
         self.plugin_description = self.get_manifest_info("description", "")
         self.plugin_author = self._get_author_name()
+        homepage_url = self.get_manifest_info("homepage_url", "") or self.get_manifest_info("urls.homepage", "")
+        repository_url = self.get_manifest_info("repository_url", "") or self.get_manifest_info("urls.repository", "")
 
         # 创建插件信息对象
         self.plugin_info = PluginInfo(
@@ -109,8 +112,8 @@ class PluginBase(ABC):
             # manifest相关信息
             manifest_data=self.manifest_data.copy(),
             license=self.get_manifest_info("license", ""),
-            homepage_url=self.get_manifest_info("homepage_url", ""),
-            repository_url=self.get_manifest_info("repository_url", ""),
+            homepage_url=homepage_url,
+            repository_url=repository_url,
             keywords=self.get_manifest_info("keywords", []).copy() if self.get_manifest_info("keywords") else [],
             categories=self.get_manifest_info("categories", []).copy() if self.get_manifest_info("categories") else [],
             min_host_version=self.get_manifest_info("host_application.min_version", ""),
@@ -144,14 +147,8 @@ class PluginBase(ABC):
 
         try:
             with open(manifest_path, "r", encoding="utf-8") as f:
-                self.manifest_data = json.load(f)
-
-            logger.debug(f"{self.log_prefix} 成功加载manifest文件: {manifest_path}")
-
-            # 验证manifest格式
-            self._validate_manifest()
-
-        except json.JSONDecodeError as e:
+                self.manifest_data = parse_json_document(f.read())
+        except ValueError as e:
             error_msg = f"{self.log_prefix} manifest文件格式错误: {e}"
             logger.error(error_msg)
             raise ValueError(error_msg)  # noqa
@@ -159,6 +156,11 @@ class PluginBase(ABC):
             error_msg = f"{self.log_prefix} 读取manifest文件失败: {e}"
             logger.error(error_msg)
             raise IOError(error_msg)  # noqa
+
+        logger.debug(f"{self.log_prefix} 成功加载manifest文件: {manifest_path}")
+
+        # 验证manifest格式
+        self._validate_manifest()
 
     def _get_author_name(self) -> str:
         """从manifest获取作者名称"""

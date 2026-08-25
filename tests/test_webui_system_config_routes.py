@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
@@ -462,12 +463,19 @@ class AdapterConfigRoutesTest(unittest.IsolatedAsyncioTestCase):
         os.chdir(self.root)
         self.project_root_patch = patch.object(config_routes, "PROJECT_ROOT", str(self.root))
         self.project_root_patch.start()
+        self.onebot_plugin_path = self.root / "plugins" / "onebot_adapter"
+        self.onebot_path_patch = patch(
+            "src.plugin_system.apis.plugin_manage_api.get_plugin_path",
+            return_value=str(self.onebot_plugin_path),
+        )
+        self.onebot_path_patch.start()
         self.token_manager = TokenManager(self.root / "data" / "webui.json")
         self.token_manager_patch = patch.object(config_routes, "get_token_manager", return_value=self.token_manager)
         self.token_manager_patch.start()
 
     def tearDown(self) -> None:
         self.token_manager_patch.stop()
+        self.onebot_path_patch.stop()
         self.project_root_patch.stop()
         os.chdir(self.old_cwd)
         self.tmp.cleanup()
@@ -587,6 +595,53 @@ class AdapterConfigRoutesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter["platform"], "qq")
         self.assertEqual(adapter["identity"], runtime_status["identity"])
         self.assertNotIn("token", repr(adapter).lower())
+
+    async def test_adapter_instances_are_empty_when_external_onebot_plugin_is_not_installed(self) -> None:
+        with patch(
+            "src.plugin_system.apis.plugin_manage_api.get_plugin_path",
+            side_effect=ValueError("not installed"),
+        ):
+            response = await config_routes.get_adapter_instances(_auth=True)
+
+        self.assertEqual(response, {"success": True, "adapters": []})
+
+    async def test_onebot_integration_resolves_the_registered_external_plugin_directory(self) -> None:
+        plugin_path = self.root / "plugins" / "github_hsd221_onebot-adapter"
+        plugin_path.mkdir(parents=True)
+        runtime_status = {"status": "connected", "started": True, "connected": True}
+        runtime_module = SimpleNamespace(adapter_runtime=SimpleNamespace(get_status=lambda: runtime_status))
+        reload_config = AsyncMock(return_value=True)
+        config_module = SimpleNamespace(config_manager=SimpleNamespace(reload=reload_config))
+
+        def import_onebot_module(module_name: str):
+            modules = {
+                "plugins.github_hsd221_onebot-adapter.adapter_core.runtime": runtime_module,
+                "plugins.github_hsd221_onebot-adapter.adapter_core.config": config_module,
+            }
+            return modules[module_name]
+
+        with (
+            patch(
+                "src.plugin_system.apis.plugin_manage_api.get_plugin_path",
+                return_value=str(plugin_path),
+            ) as get_plugin_path,
+            patch("importlib.import_module", side_effect=import_onebot_module) as import_module,
+        ):
+            self.assertEqual(config_routes._get_onebot_runtime_status(), runtime_status)
+            self.assertEqual(
+                config_routes._get_managed_adapter_path("onebot_default"),
+                str(plugin_path / "config.toml"),
+            )
+            self.assertTrue(await config_routes._reload_onebot_adapter_config())
+
+        self.assertEqual(get_plugin_path.call_count, 3)
+        self.assertEqual(
+            [call.args[0] for call in import_module.call_args_list],
+            [
+                "plugins.github_hsd221_onebot-adapter.adapter_core.runtime",
+                "plugins.github_hsd221_onebot-adapter.adapter_core.config",
+            ],
+        )
 
     async def test_managed_onebot_config_is_structured_and_preserves_hidden_sections(self) -> None:
         config_path = self.root / "plugins" / "onebot_adapter" / "config.toml"

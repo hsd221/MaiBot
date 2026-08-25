@@ -901,6 +901,9 @@ class WebUIConfig(ConfigBase):
     secure_cookie: bool = False
     """是否启用安全Cookie（仅通过HTTPS传输，默认false）"""
 
+    plugin_registry_url: str = "https://raw.githubusercontent.com/hsd221/RiyaBot-Plugins-Registry/main/registry.json"
+    """RiyaBot 官方插件 Registry 地址；市场请求不会接受客户端覆盖"""
+
 
 @dataclass
 class DebugConfig(ConfigBase):

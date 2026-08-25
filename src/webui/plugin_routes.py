@@ -9,15 +9,41 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, get_origin
 
-from fastapi import APIRouter, Cookie, Header, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Cookie, Header, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.common.logger import get_logger, hash_id
 from src.common.toml_utils import save_toml_with_format
-from src.config.config import MMC_VERSION
+from src.config.config import MMC_VERSION, global_config
 from src.plugin_system.base.config_types import ConfigField
-from src.webui.error_utils import log_exception_type
+from src.plugin_system.core.installation_store import InstallationSource, PluginInstallationStore
+from src.plugin_system.marketplace import (
+    ManifestV2,
+    PluginRegistry,
+    RegistryPlugin,
+    RegistryVersion,
+    RegistryArtifactNotSupportedError,
+    parse_json_document,
+    parse_manifest_v2,
+    registry_version_order_key,
+    validate_market_plugin_id,
+    validate_semver,
+)
+from src.plugin_system.utils.manifest_utils import ManifestValidator
+from src.webui.error_utils import internal_server_error, log_exception_type
 from src.webui.path_utils import resolve_path_within
+from src.webui.plugin_market_service import (
+    PLUGIN_REGISTRY_CATALOG_CACHE_SECONDS,
+    PluginRegistryFetchError,
+    PluginRegistryFormatError,
+    fetch_plugin_registry,
+)
+from src.webui.plugin_runtime_state import (
+    DEFAULT_PLUGIN_RUNTIME_CONFIG_FILES,
+    collect_plugin_runtime_entries,
+    move_plugin_runtime_entries,
+    restore_plugin_runtime_entries,
+)
 from .git_mirror_service import (
     MAX_RAW_FILE_BYTES,
     get_git_mirror_service,
@@ -39,6 +65,8 @@ MAX_PLUGIN_NAME_CHARS = 256
 MAX_PLUGIN_VERSION_CHARS = 128
 MAX_PLUGIN_AUTHOR_CHARS = 256
 MAX_PLUGIN_INDEX_ENTRIES = 10_000
+MAX_MARKET_PLUGIN_ENTRIES = 2_000
+MAX_MARKET_PLUGIN_BYTES = 16 * 1024 * 1024
 
 # 创建路由器
 router = APIRouter(prefix="/plugins", tags=["插件管理"])
@@ -207,8 +235,8 @@ def _load_plugin_manifest(plugin_path: Path) -> Optional[Dict[str, Any]]:
         return None
     manifest_content = _read_limited_utf8(manifest_path, MAX_PLUGIN_MANIFEST_BYTES, "插件清单")
     try:
-        manifest = json.loads(manifest_content)
-    except json.JSONDecodeError as exc:
+        manifest = parse_json_document(manifest_content)
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail="插件清单格式无效") from exc
     if not isinstance(manifest, dict):
         raise HTTPException(status_code=400, detail="插件清单格式无效")
@@ -232,7 +260,8 @@ def _find_plugin_path(plugin_id: str) -> Optional[Path]:
             manifest = _load_plugin_manifest(plugin_path)
             if manifest is None:
                 continue
-            if manifest.get("id") == plugin_id or candidate.name == plugin_id:
+            declared_id = manifest.get("id")
+            if declared_id == plugin_id or (declared_id is None and candidate.name == plugin_id):
                 return plugin_path
         except HTTPException:
             if candidate.name == plugin_id:
@@ -323,12 +352,41 @@ async def _report_raw_fetch_failure(detail: str) -> None:
         logger.warning("推送 Raw 文件失败进度失败", error_type=type(exc).__name__)
 
 
+async def _report_market_operation_failure(operation: str, plugin_id: str, detail: str) -> None:
+    message = "市场插件安装失败" if operation == "install" else "市场插件版本切换失败"
+    try:
+        await update_progress(
+            stage="error",
+            progress=0,
+            message=message,
+            error=detail,
+            operation=operation,
+            plugin_id=plugin_id,
+        )
+    except Exception as exc:
+        logger.warning("推送市场插件失败进度失败", error_type=type(exc).__name__)
+
+
 def _prepare_plugin_manifest(plugin_path: Path, plugin_id: str) -> Dict[str, Any]:
     manifest = _load_plugin_manifest(plugin_path)
     if manifest is None:
         raise HTTPException(status_code=400, detail="无效的插件：缺少 _manifest.json")
-    if manifest.get("manifest_version") != 1:
+    manifest_version = manifest.get("manifest_version")
+    if manifest_version not in {1, 2}:
         raise HTTPException(status_code=400, detail="插件清单版本无效")
+
+    if manifest_version == 2:
+        manifest_path = _plugin_file_path(plugin_path, "_manifest.json")
+        manifest_content = _read_limited_utf8(manifest_path, MAX_PLUGIN_MANIFEST_BYTES, "插件清单")
+        try:
+            parsed_manifest = parse_manifest_v2(manifest_content)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="插件清单格式无效") from exc
+        if parsed_manifest.id != plugin_id:
+            raise HTTPException(status_code=400, detail="插件 ID 与 Manifest 不一致")
+        if not ManifestValidator().validate_manifest(parsed_manifest.model_dump(mode="json")):
+            raise HTTPException(status_code=400, detail="插件与当前版本不兼容")
+        return parsed_manifest.model_dump(mode="json")
 
     _safe_manifest_text(manifest.get("name"), "名称", MAX_PLUGIN_NAME_CHARS)
     _safe_manifest_text(manifest.get("version"), "版本", MAX_PLUGIN_VERSION_CHARS)
@@ -338,6 +396,9 @@ def _prepare_plugin_manifest(plugin_path: Path, plugin_id: str) -> Dict[str, Any
     else:
         _safe_manifest_text(author, "作者", MAX_PLUGIN_AUTHOR_CHARS)
 
+    declared_id = manifest.get("id")
+    if declared_id is not None and declared_id != plugin_id:
+        raise HTTPException(status_code=400, detail="插件 ID 与 Manifest 不一致")
     manifest["id"] = plugin_id
     try:
         manifest_content = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
@@ -346,6 +407,142 @@ def _prepare_plugin_manifest(plugin_path: Path, plugin_id: str) -> Dict[str, Any
     manifest_path = _plugin_file_path(plugin_path, "_manifest.json")
     _atomic_write_bytes(manifest_path, manifest_content, MAX_PLUGIN_MANIFEST_BYTES, "插件清单")
     return manifest
+
+
+def _prepare_market_plugin_candidate(
+    plugin_path: Path,
+    reviewed_manifest: ManifestV2,
+) -> ManifestV2:
+    plugin_file = _plugin_file_path(plugin_path, "plugin.py")
+    manifest_path = _plugin_file_path(plugin_path, "_manifest.json")
+    _require_regular_file(plugin_file, "插件入口")
+    manifest_content = _read_limited_utf8(manifest_path, MAX_PLUGIN_MANIFEST_BYTES, "插件清单")
+    try:
+        manifest = parse_manifest_v2(manifest_content)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="插件清单格式无效") from exc
+    if manifest != reviewed_manifest:
+        raise HTTPException(status_code=400, detail="插件清单与市场审核记录不一致")
+
+    git_path = plugin_path / ".git"
+    if os.path.lexists(git_path):
+        if git_path.is_symlink() or not git_path.is_dir():
+            raise HTTPException(status_code=400, detail="插件 Git 元数据路径无效")
+        _remove_plugin_tree(git_path)
+
+    entry_count = 0
+    total_bytes = 0
+    for current_root, directory_names, file_names in os.walk(plugin_path, topdown=True, followlinks=False):
+        current_path = Path(current_root)
+        for name in directory_names + file_names:
+            entry_path = current_path / name
+            try:
+                entry_stat = os.lstat(entry_path)
+            except OSError as exc:
+                raise HTTPException(status_code=400, detail="插件目录内容无效") from exc
+            entry_count += 1
+            if entry_count > MAX_MARKET_PLUGIN_ENTRIES:
+                raise HTTPException(status_code=413, detail="插件文件数量超过限制")
+            if stat.S_ISLNK(entry_stat.st_mode):
+                raise HTTPException(status_code=400, detail="市场插件不能包含符号链接")
+            if stat.S_ISREG(entry_stat.st_mode):
+                total_bytes += entry_stat.st_size
+                if total_bytes > MAX_MARKET_PLUGIN_BYTES:
+                    raise HTTPException(status_code=413, detail="插件文件总大小超过限制")
+            elif not stat.S_ISDIR(entry_stat.st_mode):
+                raise HTTPException(status_code=400, detail="市场插件只能包含普通文件和目录")
+
+    validator = ManifestValidator()
+    if not validator.validate_manifest(manifest.model_dump(mode="json")):
+        raise HTTPException(status_code=400, detail="插件与当前版本不兼容")
+    return manifest
+
+
+def _is_market_manifest_compatible(manifest: ManifestV2) -> bool:
+    return ManifestValidator().validate_manifest(manifest.model_dump(mode="json"))
+
+
+def _require_installed_market_source(
+    plugin_path: Path,
+    plugin_id: str,
+    source: InstallationSource,
+) -> ManifestV2:
+    manifest_path = _plugin_file_path(plugin_path, "_manifest.json")
+    manifest_content = _read_limited_utf8(manifest_path, MAX_PLUGIN_MANIFEST_BYTES, "插件清单")
+    try:
+        manifest = parse_manifest_v2(manifest_content)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail="本地插件与市场安装来源不一致") from exc
+
+    if (
+        manifest.id != plugin_id
+        or manifest.version != source.installed_version
+        or source.repository_url is None
+        or manifest.urls.repository != source.repository_url
+    ):
+        raise HTTPException(status_code=409, detail="本地插件与市场安装来源不一致")
+    return manifest
+
+
+def _verified_installation_source(
+    plugin_id: str,
+    source: InstallationSource | None,
+    *,
+    plugin_path: Path | None = None,
+) -> InstallationSource | None:
+    if source is None or source.install_method != "market":
+        return source
+
+    try:
+        if plugin_path is None:
+            plugins_dir = _plugins_directory()
+            plugin_path = _lifecycle_plugin_path(plugin_id, plugins_dir) if plugins_dir is not None else None
+        if plugin_path is None:
+            raise HTTPException(status_code=404, detail="插件未安装")
+        _require_installed_market_source(plugin_path, plugin_id, source)
+    except HTTPException:
+        logger.warning(
+            "本地插件与市场安装来源不一致，已隐藏来源信息",
+            event_code="plugin.market.local_source_drift",
+            plugin_hash=hash_id(plugin_id),
+        )
+        return None
+    return source
+
+
+def _verified_registry_installation_source(
+    plugin_id: str,
+    source: InstallationSource | None,
+    *,
+    registry_url: str,
+    plugin: RegistryPlugin,
+) -> InstallationSource | None:
+    """Return a market binding only when it is verified against this Registry."""
+    if source is None or source.install_method != "market":
+        return source
+    if source.registry_url != registry_url:
+        return None
+
+    matching_release = next(
+        (
+            release
+            for release in plugin.versions
+            if release.version == source.installed_version
+            and release.ref == source.source_ref
+            and release.commit == source.source_commit
+            and release.sha256 == source.artifact_sha256
+        ),
+        None,
+    )
+    if source.plugin_id == plugin_id and source.repository_url == plugin.repository and matching_release is not None:
+        return source
+
+    logger.warning(
+        "插件安装来源与 Registry 审核坐标不一致，已隐藏来源信息",
+        event_code="plugin.market.registry_source_drift",
+        plugin_hash=hash_id(plugin_id),
+    )
+    return None
 
 
 def _existing_plugin_metadata(plugin_path: Path, plugin_id: str) -> tuple[str, str]:
@@ -373,6 +570,9 @@ def _lifecycle_plugin_path(plugin_id: str, plugins_dir: Path) -> Optional[Path]:
             raise HTTPException(status_code=400, detail="插件目录路径无效") from exc
         if not resolved.is_relative_to(plugins_dir) or not resolved.is_dir():
             raise HTTPException(status_code=400, detail="插件目录路径无效")
+        manifest = _load_plugin_manifest(resolved)
+        if manifest is not None and manifest.get("id") not in {None, plugin_id}:
+            continue
         return resolved
     return _find_plugin_path(plugin_id)
 
@@ -439,6 +639,31 @@ def _require_directory_identity(path: Path, expected: tuple[int, int]) -> None:
         raise HTTPException(status_code=409, detail="插件目录已发生变化，请重试")
 
 
+def _plugin_runtime_config_files(plugin_id: str) -> frozenset[str]:
+    config_files = set(DEFAULT_PLUGIN_RUNTIME_CONFIG_FILES)
+    instance = find_plugin_instance(plugin_id)
+    if instance is None:
+        return frozenset(config_files)
+
+    try:
+        config_file_name = instance.config_file_name
+    except Exception as exc:
+        logger.warning("读取插件运行配置文件名失败", plugin_id=plugin_id, error_type=type(exc).__name__)
+        return frozenset(config_files)
+    if not config_file_name:
+        return frozenset(config_files)
+    if (
+        not isinstance(config_file_name, str)
+        or Path(config_file_name).name != config_file_name
+        or Path(config_file_name).is_absolute()
+        or Path(config_file_name).suffix.lower() != ".toml"
+    ):
+        logger.warning("忽略无效的插件运行配置文件名", plugin_id=plugin_id)
+        return frozenset(config_files)
+    config_files.add(config_file_name)
+    return frozenset(config_files)
+
+
 def _install_staged_plugin(staged_path: Path, target_path: Path, staged_identity: tuple[int, int]) -> None:
     _require_directory_identity(staged_path, staged_identity)
     if os.path.lexists(target_path):
@@ -451,15 +676,17 @@ def _install_staged_plugin(staged_path: Path, target_path: Path, staged_identity
         raise
 
 
-def _replace_plugin_directory(
+def _activate_plugin_replacement(
     plugin_path: Path,
     staged_path: Path,
     plugins_dir: Path,
     expected_identity: tuple[int, int],
     staged_identity: tuple[int, int],
-) -> None:
+    config_files: frozenset[str] = DEFAULT_PLUGIN_RUNTIME_CONFIG_FILES,
+) -> tuple[Path, tuple[str, ...]]:
     _require_directory_identity(plugin_path, expected_identity)
     _require_directory_identity(staged_path, staged_identity)
+    runtime_entries = collect_plugin_runtime_entries(plugin_path, staged_path, config_files)
     backup_path = _reserve_hidden_path(plugins_dir, ".plugin-backup-")
     os.replace(plugin_path, backup_path)
     try:
@@ -470,11 +697,91 @@ def _replace_plugin_directory(
         except OSError as rollback_error:
             logger.critical("插件更新回滚失败", error_type=type(rollback_error).__name__)
         raise
+    try:
+        move_plugin_runtime_entries(backup_path, plugin_path, runtime_entries)
+    except BaseException:
+        try:
+            _restore_plugin_replacement(plugin_path, backup_path, plugins_dir, runtime_entries)
+        except Exception as rollback_error:
+            logger.critical("插件运行数据迁移回滚失败", error_type=type(rollback_error).__name__)
+        raise
+    return backup_path, runtime_entries
 
+
+def _restore_plugin_replacement(
+    plugin_path: Path,
+    backup_path: Path,
+    plugins_dir: Path,
+    runtime_entries: tuple[str, ...],
+) -> None:
+    restore_plugin_runtime_entries(plugin_path, backup_path, runtime_entries)
+    failed_path: Path | None = None
+    try:
+        if os.path.lexists(plugin_path):
+            failed_path = _reserve_hidden_path(plugins_dir, ".plugin-failed-")
+            os.replace(plugin_path, failed_path)
+        os.replace(backup_path, plugin_path)
+    except BaseException:
+        if failed_path is not None and os.path.lexists(failed_path):
+            try:
+                os.replace(failed_path, plugin_path)
+            except OSError as rollback_error:
+                logger.critical("恢复插件更新候选失败", error_type=type(rollback_error).__name__)
+        if os.path.lexists(plugin_path) and os.path.lexists(backup_path):
+            try:
+                move_plugin_runtime_entries(backup_path, plugin_path, runtime_entries)
+            except Exception as rollback_error:
+                logger.critical("恢复插件运行数据失败", error_type=type(rollback_error).__name__)
+        raise
+
+    if failed_path is not None:
+        try:
+            _remove_plugin_tree(failed_path)
+        except Exception as cleanup_error:
+            logger.error("清理插件失败版本失败", error_type=type(cleanup_error).__name__)
+
+
+def _finalize_plugin_replacement(backup_path: Path) -> None:
     try:
         _remove_plugin_tree(backup_path)
     except Exception as cleanup_error:
         logger.error("清理插件旧版本失败", error_type=type(cleanup_error).__name__)
+
+
+def _replace_plugin_directory(
+    plugin_path: Path,
+    staged_path: Path,
+    plugins_dir: Path,
+    expected_identity: tuple[int, int],
+    staged_identity: tuple[int, int],
+    config_files: frozenset[str] = DEFAULT_PLUGIN_RUNTIME_CONFIG_FILES,
+) -> None:
+    backup_path, _runtime_entries = _activate_plugin_replacement(
+        plugin_path,
+        staged_path,
+        plugins_dir,
+        expected_identity,
+        staged_identity,
+        config_files,
+    )
+    _finalize_plugin_replacement(backup_path)
+
+
+def _stage_plugin_uninstall(
+    plugin_path: Path,
+    plugins_dir: Path,
+    expected_identity: tuple[int, int],
+) -> Path:
+    _require_directory_identity(plugin_path, expected_identity)
+    trash_path = _reserve_hidden_path(plugins_dir, ".plugin-uninstall-")
+    os.replace(plugin_path, trash_path)
+    return trash_path
+
+
+def _restore_plugin_uninstall(plugin_path: Path, trash_path: Path) -> None:
+    if os.path.lexists(plugin_path):
+        raise HTTPException(status_code=409, detail="插件目录已发生变化，无法恢复")
+    os.replace(trash_path, plugin_path)
 
 
 def _uninstall_plugin_directory(
@@ -482,14 +789,12 @@ def _uninstall_plugin_directory(
     plugins_dir: Path,
     expected_identity: tuple[int, int],
 ) -> None:
-    _require_directory_identity(plugin_path, expected_identity)
-    trash_path = _reserve_hidden_path(plugins_dir, ".plugin-uninstall-")
-    os.replace(plugin_path, trash_path)
+    trash_path = _stage_plugin_uninstall(plugin_path, plugins_dir, expected_identity)
     try:
         _remove_plugin_tree(trash_path)
     except BaseException:
         try:
-            os.replace(trash_path, plugin_path)
+            _restore_plugin_uninstall(plugin_path, trash_path)
         except OSError as rollback_error:
             logger.critical("插件卸载回滚失败", error_type=type(rollback_error).__name__)
         raise
@@ -789,6 +1094,15 @@ class InstallPluginRequest(BaseModel):
     mirror_id: Optional[str] = Field(None, description="指定镜像源 ID")
 
 
+class MarketPluginRequest(BaseModel):
+    """Install or switch to a reviewed market version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plugin_id: str = Field(..., min_length=1, max_length=MAX_PLUGIN_ID_CHARS)
+    version: str = Field(..., min_length=1, max_length=MAX_PLUGIN_VERSION_CHARS)
+
+
 class VersionResponse(BaseModel):
     """璃夜版本响应"""
 
@@ -813,6 +1127,327 @@ class UpdatePluginRequest(BaseModel):
     mirror_id: Optional[str] = Field(None, description="指定镜像源 ID")
 
 
+class PluginMarketRegistryResponse(BaseModel):
+    name: str
+    url: str
+    repository_url: str
+    fetched_at: datetime.datetime
+
+
+class PluginMarketAuthorResponse(BaseModel):
+    name: str
+    url: str | None
+
+
+class PluginMarketCompatibilityResponse(BaseModel):
+    min_version: str
+    max_version: str | None
+
+
+class PluginMarketVersionResponse(BaseModel):
+    version: str
+    ref: str
+    commit: str
+    status: str
+    released_at: datetime.datetime
+    stable: bool
+    installable: bool
+    host_application: PluginMarketCompatibilityResponse
+
+
+class PluginMarketInstallationResponse(BaseModel):
+    install_method: str
+    installed_version: str
+    registry_url: str | None
+    repository_url: str | None
+    source_ref: str | None
+    source_commit: str | None
+    updated_at: datetime.datetime
+
+
+class PluginMarketItemResponse(BaseModel):
+    id: str
+    name: str
+    description: str
+    author: PluginMarketAuthorResponse
+    license: str
+    repository_url: str
+    homepage_url: str | None
+    status: str
+    review_level: str
+    updated_at: datetime.datetime
+    capabilities: list[str]
+    categories: list[str]
+    keywords: list[str]
+    host_application: PluginMarketCompatibilityResponse
+    latest_version: str | None
+    versions: list[PluginMarketVersionResponse]
+    installation: PluginMarketInstallationResponse | None
+
+
+class PluginMarketPaginationResponse(BaseModel):
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+
+
+class PluginMarketResponse(BaseModel):
+    registry: PluginMarketRegistryResponse
+    plugins: list[PluginMarketItemResponse]
+    pagination: PluginMarketPaginationResponse
+
+
+class PluginMarketDetailResponse(BaseModel):
+    registry: PluginMarketRegistryResponse
+    plugin: PluginMarketItemResponse
+
+
+def _validate_market_request(request: MarketPluginRequest) -> tuple[str, str]:
+    try:
+        return validate_market_plugin_id(request.plugin_id), validate_semver(request.version)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="市场插件 ID 或版本无效") from exc
+
+
+async def _resolve_market_release(
+    registry_url: str,
+    plugin_id: str,
+    version: str,
+) -> tuple[str, RegistryPlugin, RegistryVersion]:
+    try:
+        snapshot = await fetch_plugin_registry(registry_url)
+    except PluginRegistryFetchError:
+        raise HTTPException(status_code=502, detail="插件市场暂时不可用") from None
+    except PluginRegistryFormatError:
+        raise HTTPException(status_code=502, detail="插件市场数据无效") from None
+
+    try:
+        plugin = snapshot.registry.plugins[plugin_id]
+        release = snapshot.registry.installable_version(plugin_id, version)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="市场中不存在该插件或版本") from None
+    except RegistryArtifactNotSupportedError:
+        raise HTTPException(status_code=501, detail="市场制品下载暂未支持") from None
+    except ValueError:
+        raise HTTPException(status_code=409, detail="该插件或版本当前不可安装") from None
+    if not _is_market_manifest_compatible(release.manifest):
+        raise HTTPException(status_code=400, detail="插件与当前版本不兼容")
+    return snapshot.registry_url, plugin, release
+
+
+async def _clone_market_candidate(
+    plugin: RegistryPlugin,
+    release: RegistryVersion,
+    staged_path: Path,
+    staging_root: Path,
+) -> tuple[ManifestV2, tuple[int, int]]:
+    try:
+        owner, repo, is_github, repository_url = parse_repository_url(plugin.repository)
+    except ValueError:
+        raise HTTPException(status_code=502, detail="插件市场仓库地址无效") from None
+
+    clone_kwargs: dict[str, Any] = {
+        "owner": owner,
+        "repo": repo,
+        "target_path": staged_path,
+        "branch": release.ref,
+        "depth": 1,
+        "expected_commit": release.commit,
+    }
+    if not is_github:
+        clone_kwargs["custom_url"] = repository_url
+
+    result = await get_git_mirror_service().clone_repository(**clone_kwargs)
+    if not isinstance(result, dict) or result.get("success") is not True:
+        raise HTTPException(status_code=502, detail="插件文件下载失败")
+    actual_commit = result.get("commit")
+    if not isinstance(actual_commit, str) or actual_commit.lower() != release.commit:
+        raise HTTPException(status_code=409, detail="插件来源与市场审核记录不一致")
+
+    staged_identity = _staged_plugin_identity(staged_path, staging_root)
+    manifest = _prepare_market_plugin_candidate(staged_path, release.manifest)
+    _require_directory_identity(staged_path, staged_identity)
+    return manifest, staged_identity
+
+
+def _market_installation_source(
+    *,
+    plugin_id: str,
+    registry_url: str,
+    plugin: RegistryPlugin,
+    release: RegistryVersion,
+    installed_at: datetime.datetime | None = None,
+) -> InstallationSource:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return InstallationSource(
+        plugin_id=plugin_id,
+        install_method="market",
+        registry_url=registry_url,
+        repository_url=plugin.repository,
+        source_ref=release.ref,
+        source_commit=release.commit,
+        artifact_sha256=None,
+        installed_version=release.version,
+        installed_at=installed_at or now,
+        updated_at=now,
+        last_checked_at=now,
+    )
+
+
+def _clone_result_commit(result: dict[str, Any]) -> str:
+    commit = result.get("commit")
+    if (
+        not isinstance(commit, str)
+        or len(commit) not in {40, 64}
+        or any(character not in "0123456789abcdefABCDEF" for character in commit)
+    ):
+        raise HTTPException(status_code=502, detail="无法确认插件源码版本")
+    return commit.lower()
+
+
+def _git_installation_source(
+    *,
+    plugin_id: str,
+    repository_url: str,
+    source_ref: str | None,
+    source_commit: str,
+    installed_version: str,
+    installed_at: datetime.datetime | None = None,
+) -> InstallationSource:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if repository_url.endswith(".git"):
+        repository_url = repository_url[:-4]
+    return InstallationSource(
+        plugin_id=plugin_id,
+        install_method="git",
+        registry_url=None,
+        repository_url=repository_url,
+        source_ref=source_ref,
+        source_commit=source_commit,
+        artifact_sha256=None,
+        installed_version=installed_version,
+        installed_at=installed_at or now,
+        updated_at=now,
+        last_checked_at=now,
+    )
+
+
+def _market_installation_response(source: InstallationSource | None) -> PluginMarketInstallationResponse | None:
+    if source is None:
+        return None
+    return PluginMarketInstallationResponse(
+        install_method=source.install_method,
+        installed_version=source.installed_version,
+        registry_url=source.registry_url,
+        repository_url=source.repository_url,
+        source_ref=source.source_ref,
+        source_commit=source.source_commit,
+        updated_at=source.updated_at,
+    )
+
+
+def _is_current_registry_installation(
+    installation: InstallationSource | None,
+    *,
+    plugin_id: str,
+    registry_url: str,
+) -> bool:
+    return bool(
+        installation is not None
+        and installation.plugin_id == plugin_id
+        and installation.install_method == "market"
+        and installation.registry_url == registry_url
+    )
+
+
+def _market_plugin_matches_query(plugin_id: str, plugin: RegistryPlugin, normalized_query: str) -> bool:
+    if not normalized_query:
+        return True
+    for version in plugin.versions:
+        manifest = version.manifest
+        searchable = " ".join((plugin_id, manifest.name, manifest.description, manifest.author.name)).casefold()
+        if normalized_query in searchable:
+            return True
+    return False
+
+
+def _market_item_response(
+    registry: PluginRegistry,
+    plugin_id: str,
+    plugin: RegistryPlugin,
+    installation: InstallationSource | None,
+) -> PluginMarketItemResponse:
+    version_compatibility = {
+        version.version: _is_market_manifest_compatible(version.manifest) for version in plugin.versions
+    }
+    stable_candidates = [
+        version
+        for version in plugin.versions
+        if (
+            plugin.status == "approved"
+            and version.status == "approved"
+            and version.is_stable
+            and version.artifact_url is None
+            and version_compatibility[version.version]
+        )
+    ]
+    latest = max(
+        stable_candidates,
+        key=registry_version_order_key,
+        default=None,
+    )
+    metadata_version = latest or max(plugin.versions, key=registry_version_order_key)
+    manifest = metadata_version.manifest
+    versions = [
+        PluginMarketVersionResponse(
+            version=version.version,
+            ref=version.ref,
+            commit=version.commit,
+            status=version.status,
+            released_at=version.released_at,
+            stable=version.is_stable,
+            installable=(
+                plugin.status == "approved"
+                and version.status == "approved"
+                and version.artifact_url is None
+                and version_compatibility[version.version]
+            ),
+            host_application=PluginMarketCompatibilityResponse(
+                min_version=version.manifest.host_application.min_version,
+                max_version=version.manifest.host_application.max_version,
+            ),
+        )
+        for version in sorted(
+            plugin.versions,
+            key=lambda item: (item.released_at, item.version, item.ref),
+            reverse=True,
+        )
+    ]
+    return PluginMarketItemResponse(
+        id=plugin_id,
+        name=manifest.name,
+        description=manifest.description,
+        author=PluginMarketAuthorResponse(name=manifest.author.name, url=manifest.author.url),
+        license=manifest.license,
+        repository_url=plugin.repository,
+        homepage_url=manifest.urls.homepage,
+        status=plugin.status,
+        review_level=plugin.review_level,
+        updated_at=plugin.updated_at,
+        capabilities=list(manifest.capabilities),
+        categories=list(manifest.categories),
+        keywords=list(manifest.keywords),
+        host_application=PluginMarketCompatibilityResponse(
+            min_version=manifest.host_application.min_version,
+            max_version=manifest.host_application.max_version,
+        ),
+        latest_version=latest.version if latest is not None else None,
+        versions=versions,
+        installation=_market_installation_response(installation),
+    )
+
+
 # ============ API 路由 ============
 
 
@@ -826,6 +1461,324 @@ async def get_maimai_version() -> VersionResponse:
     major, minor, patch = parse_version(MMC_VERSION)
 
     return VersionResponse(version=MMC_VERSION, version_major=major, version_minor=minor, version_patch=patch)
+
+
+@router.get("/market", response_model=PluginMarketResponse)
+async def get_plugin_market(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    query: str | None = Query(None, max_length=128),
+    maibot_session: Optional[str] = Cookie(None),
+    authorization: Optional[str] = Header(None),
+) -> PluginMarketResponse:
+    token = get_token_from_cookie_or_header(maibot_session, authorization)
+    token_manager = get_token_manager()
+    if not token or not token_manager.verify_token(token):
+        raise HTTPException(status_code=401, detail="未授权：无效的访问令牌")
+
+    try:
+        snapshot = await fetch_plugin_registry(
+            global_config.webui.plugin_registry_url,
+            cache_ttl_seconds=PLUGIN_REGISTRY_CATALOG_CACHE_SECONDS,
+        )
+        installations = PluginInstallationStore().list_all()
+    except PluginRegistryFetchError:
+        raise HTTPException(status_code=502, detail="插件市场暂时不可用") from None
+    except PluginRegistryFormatError:
+        raise HTTPException(status_code=502, detail="插件市场数据无效") from None
+    except Exception as exc:
+        raise internal_server_error(logger, "加载插件市场失败", exc) from None
+
+    normalized_query = query.strip().casefold() if query else ""
+    eligible_plugins: list[tuple[str, RegistryPlugin, InstallationSource | None]] = []
+    for plugin_id, plugin in sorted(snapshot.registry.plugins.items()):
+        installation = _verified_installation_source(plugin_id, installations.get(plugin_id))
+        installation = _verified_registry_installation_source(
+            plugin_id,
+            installation,
+            registry_url=snapshot.registry_url,
+            plugin=plugin,
+        )
+        if plugin.status != "approved" and not _is_current_registry_installation(
+            installation,
+            plugin_id=plugin_id,
+            registry_url=snapshot.registry_url,
+        ):
+            continue
+        eligible_plugins.append((plugin_id, plugin, installation))
+
+    if normalized_query:
+        eligible_plugins = [
+            item for item in eligible_plugins if _market_plugin_matches_query(item[0], item[1], normalized_query)
+        ]
+    total = len(eligible_plugins)
+    start = (page - 1) * page_size
+    paginated = [
+        _market_item_response(snapshot.registry, plugin_id, plugin, installation)
+        for plugin_id, plugin, installation in eligible_plugins[start : start + page_size]
+    ]
+    return PluginMarketResponse(
+        registry=PluginMarketRegistryResponse(
+            name=snapshot.registry.meta.name,
+            url=snapshot.registry_url,
+            repository_url=snapshot.registry.meta.repository,
+            fetched_at=snapshot.fetched_at,
+        ),
+        plugins=paginated,
+        pagination=PluginMarketPaginationResponse(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=(total + page_size - 1) // page_size,
+        ),
+    )
+
+
+@router.get("/market/{plugin_id}", response_model=PluginMarketDetailResponse)
+async def get_bound_market_plugin(
+    plugin_id: str,
+    maibot_session: Optional[str] = Cookie(None),
+    authorization: Optional[str] = Header(None),
+) -> PluginMarketDetailResponse:
+    token = get_token_from_cookie_or_header(maibot_session, authorization)
+    if not token or not get_token_manager().verify_token(token):
+        raise HTTPException(status_code=401, detail="未授权：无效的访问令牌")
+
+    try:
+        plugin_id = validate_market_plugin_id(plugin_id)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="市场插件 ID 无效") from exc
+
+    try:
+        source = PluginInstallationStore().get(plugin_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="插件没有市场安装记录")
+        if source.install_method != "market" or source.registry_url is None:
+            raise HTTPException(status_code=409, detail="该插件不是市场安装")
+
+        plugins_dir = _plugins_directory()
+        plugin_path = _lifecycle_plugin_path(plugin_id, plugins_dir) if plugins_dir is not None else None
+        if plugin_path is None:
+            raise HTTPException(status_code=404, detail="插件未安装")
+        _require_installed_market_source(plugin_path, plugin_id, source)
+
+        snapshot = await fetch_plugin_registry(
+            source.registry_url,
+            cache_ttl_seconds=PLUGIN_REGISTRY_CATALOG_CACHE_SECONDS,
+        )
+        plugin = snapshot.registry.plugins.get(plugin_id)
+        if plugin is None:
+            raise HTTPException(status_code=404, detail="绑定的插件市场中不存在该插件")
+        source = _verified_registry_installation_source(
+            plugin_id,
+            source,
+            registry_url=snapshot.registry_url,
+            plugin=plugin,
+        )
+        if source is None:
+            raise HTTPException(status_code=409, detail="插件来源与市场审核记录不一致")
+    except HTTPException:
+        raise
+    except PluginRegistryFetchError:
+        raise HTTPException(status_code=502, detail="绑定的插件市场暂时不可用") from None
+    except PluginRegistryFormatError:
+        raise HTTPException(status_code=502, detail="绑定的插件市场数据无效") from None
+    except Exception as exc:
+        raise internal_server_error(logger, "加载绑定的插件市场版本失败", exc) from None
+
+    return PluginMarketDetailResponse(
+        registry=PluginMarketRegistryResponse(
+            name=snapshot.registry.meta.name,
+            url=snapshot.registry_url,
+            repository_url=snapshot.registry.meta.repository,
+            fetched_at=snapshot.fetched_at,
+        ),
+        plugin=_market_item_response(snapshot.registry, plugin_id, plugin, source),
+    )
+
+
+@router.post("/market/install")
+async def install_market_plugin(
+    request: MarketPluginRequest,
+    maibot_session: Optional[str] = Cookie(None),
+    authorization: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    token = get_token_from_cookie_or_header(maibot_session, authorization)
+    if not token or not get_token_manager().verify_token(token):
+        raise HTTPException(status_code=401, detail="未授权：无效的访问令牌")
+
+    plugin_id, version = _validate_market_request(request)
+    staging_root: Path | None = None
+    try:
+        await update_progress(
+            stage="loading",
+            progress=5,
+            message=f"开始安装市场插件: {plugin_id}",
+            operation="install",
+            plugin_id=plugin_id,
+        )
+        registry_url, plugin, release = await _resolve_market_release(
+            global_config.webui.plugin_registry_url,
+            plugin_id,
+            version,
+        )
+
+        plugins_dir = _plugins_directory(create=True)
+        if plugins_dir is None:
+            raise RuntimeError("插件目录创建失败")
+        if _lifecycle_plugin_path(plugin_id, plugins_dir) is not None:
+            raise HTTPException(status_code=409, detail="插件已安装")
+
+        target_path = plugins_dir / plugin_id.replace(".", "_")
+        staging_root = Path(tempfile.mkdtemp(prefix=".plugin-market-install-", dir=plugins_dir))
+        staged_path = staging_root / "candidate"
+        manifest, staged_identity = await _clone_market_candidate(plugin, release, staged_path, staging_root)
+
+        if _lifecycle_plugin_path(plugin_id, plugins_dir) is not None:
+            raise HTTPException(status_code=409, detail="插件目录已存在")
+        _install_staged_plugin(staged_path, target_path, staged_identity)
+        try:
+            PluginInstallationStore().save(
+                _market_installation_source(
+                    plugin_id=plugin_id,
+                    registry_url=registry_url,
+                    plugin=plugin,
+                    release=release,
+                )
+            )
+        except Exception:
+            try:
+                _remove_plugin_tree(target_path)
+            except Exception as rollback_error:
+                logger.critical("市场插件安装回滚失败", error_type=type(rollback_error).__name__)
+            raise
+
+        await update_progress(
+            stage="success",
+            progress=100,
+            message=f"成功安装插件: {manifest.name} v{manifest.version}",
+            operation="install",
+            plugin_id=plugin_id,
+        )
+        return {
+            "success": True,
+            "message": "插件安装成功",
+            "plugin_id": plugin_id,
+            "plugin_name": manifest.name,
+            "version": manifest.version,
+            "path": str(Path("plugins") / target_path.name),
+        }
+    except HTTPException as exc:
+        await _report_market_operation_failure("install", plugin_id, str(exc.detail))
+        raise
+    except Exception as exc:
+        logger.error("安装市场插件失败", plugin_id=plugin_id, error_type=type(exc).__name__)
+        await _report_market_operation_failure("install", plugin_id, "插件安装失败")
+        raise HTTPException(status_code=500, detail="插件安装失败") from None
+    finally:
+        _cleanup_staging_root(staging_root)
+
+
+@router.post("/market/update")
+async def update_market_plugin(
+    request: MarketPluginRequest,
+    maibot_session: Optional[str] = Cookie(None),
+    authorization: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    token = get_token_from_cookie_or_header(maibot_session, authorization)
+    if not token or not get_token_manager().verify_token(token):
+        raise HTTPException(status_code=401, detail="未授权：无效的访问令牌")
+
+    plugin_id, version = _validate_market_request(request)
+    staging_root: Path | None = None
+    try:
+        store = PluginInstallationStore()
+        source = store.get(plugin_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="插件没有市场安装记录")
+        if source.install_method != "market" or source.registry_url is None:
+            raise HTTPException(status_code=409, detail="该插件不是市场安装")
+
+        plugins_dir = _plugins_directory()
+        plugin_path = _lifecycle_plugin_path(plugin_id, plugins_dir) if plugins_dir is not None else None
+        if plugin_path is None or plugins_dir is None:
+            raise HTTPException(status_code=404, detail="插件未安装")
+        installed_manifest = _require_installed_market_source(plugin_path, plugin_id, source)
+        if installed_manifest.version == version:
+            raise HTTPException(status_code=409, detail="当前已安装此版本")
+        plugin_identity = _directory_identity(plugin_path)
+
+        await update_progress(
+            stage="loading",
+            progress=5,
+            message=f"开始更新市场插件: {plugin_id}",
+            operation="update",
+            plugin_id=plugin_id,
+        )
+        registry_url, plugin, release = await _resolve_market_release(source.registry_url, plugin_id, version)
+        verified_source = _verified_registry_installation_source(
+            plugin_id,
+            source,
+            registry_url=registry_url,
+            plugin=plugin,
+        )
+        if verified_source is None:
+            raise HTTPException(status_code=409, detail="插件来源与市场审核记录不一致")
+        old_version = installed_manifest.version
+
+        staging_root = Path(tempfile.mkdtemp(prefix=".plugin-market-update-", dir=plugins_dir))
+        staged_path = staging_root / "candidate"
+        manifest, staged_identity = await _clone_market_candidate(plugin, release, staged_path, staging_root)
+        backup_path, runtime_entries = _activate_plugin_replacement(
+            plugin_path,
+            staged_path,
+            plugins_dir,
+            plugin_identity,
+            staged_identity,
+            _plugin_runtime_config_files(plugin_id),
+        )
+        try:
+            store.save(
+                _market_installation_source(
+                    plugin_id=plugin_id,
+                    registry_url=registry_url,
+                    plugin=plugin,
+                    release=release,
+                    installed_at=source.installed_at,
+                )
+            )
+        except Exception:
+            try:
+                _restore_plugin_replacement(plugin_path, backup_path, plugins_dir, runtime_entries)
+            except Exception as rollback_error:
+                logger.critical("市场插件更新回滚失败", error_type=type(rollback_error).__name__)
+            raise
+        _finalize_plugin_replacement(backup_path)
+
+        await update_progress(
+            stage="success",
+            progress=100,
+            message=f"成功更新 {manifest.name}: {old_version} -> {manifest.version}",
+            operation="update",
+            plugin_id=plugin_id,
+        )
+        return {
+            "success": True,
+            "message": "插件更新成功",
+            "plugin_id": plugin_id,
+            "plugin_name": manifest.name,
+            "old_version": old_version,
+            "new_version": manifest.version,
+        }
+    except HTTPException as exc:
+        await _report_market_operation_failure("update", plugin_id, str(exc.detail))
+        raise
+    except Exception as exc:
+        logger.error("更新市场插件失败", plugin_id=plugin_id, error_type=type(exc).__name__)
+        await _report_market_operation_failure("update", plugin_id, "插件更新失败")
+        raise HTTPException(status_code=500, detail="插件更新失败") from None
+    finally:
+        _cleanup_staging_root(staging_root)
 
 
 @router.get("/git-status", response_model=GitStatusResponse)
@@ -1247,10 +2200,27 @@ async def install_plugin(
                 error="无效的插件格式",
             )
             raise
+        source_commit = _clone_result_commit(result)
 
         if _lifecycle_plugin_path(plugin_id, plugins_dir) is not None:
             raise HTTPException(status_code=409, detail="插件目录已存在")
         _install_staged_plugin(staged_path, target_path, staged_identity)
+        try:
+            PluginInstallationStore().save(
+                _git_installation_source(
+                    plugin_id=plugin_id,
+                    repository_url=repo_url,
+                    source_ref=request.branch,
+                    source_commit=source_commit,
+                    installed_version=manifest["version"],
+                )
+            )
+        except Exception:
+            try:
+                _remove_plugin_tree(target_path)
+            except Exception as rollback_error:
+                logger.critical("Git 插件安装回滚失败", error_type=type(rollback_error).__name__)
+            raise
 
         await update_progress(
             stage="success",
@@ -1349,7 +2319,25 @@ async def uninstall_plugin(
         )
 
         plugin_identity = _directory_identity(plugin_path)
-        _uninstall_plugin_directory(plugin_path, plugins_dir, plugin_identity)
+        trash_path = _stage_plugin_uninstall(plugin_path, plugins_dir, plugin_identity)
+        installation_store = PluginInstallationStore()
+        installation_source = installation_store.get(plugin_id)
+        source_deleted = False
+        try:
+            source_deleted = bool(installation_store.delete(plugin_id))
+            _remove_plugin_tree(trash_path)
+        except BaseException:
+            if source_deleted and installation_source is not None:
+                try:
+                    installation_store.save(installation_source)
+                except Exception as restore_source_error:
+                    logger.critical("插件卸载来源恢复失败", error_type=type(restore_source_error).__name__)
+            try:
+                if os.path.lexists(trash_path):
+                    _restore_plugin_uninstall(plugin_path, trash_path)
+            except Exception as rollback_error:
+                logger.critical("插件卸载来源回滚失败", error_type=type(rollback_error).__name__)
+            raise
 
         logger.info("成功卸载插件", plugin_id=plugin_id)
 
@@ -1415,6 +2403,11 @@ async def update_plugin(
     staging_root: Optional[Path] = None
 
     try:
+        store = PluginInstallationStore()
+        existing_source = store.get(plugin_id)
+        if existing_source is not None and existing_source.install_method == "market":
+            raise HTTPException(status_code=409, detail="市场插件必须通过市场版本接口更新")
+
         try:
             owner, repo, is_github, repo_url = parse_repository_url(request.repository_url)
         except ValueError:
@@ -1509,9 +2502,35 @@ async def update_plugin(
             )
             raise
 
+        source_commit = _clone_result_commit(result)
         new_version = new_manifest["version"]
         new_name = new_manifest["name"]
-        _replace_plugin_directory(plugin_path, staged_path, plugins_dir, plugin_identity, staged_identity)
+        backup_path, runtime_entries = _activate_plugin_replacement(
+            plugin_path,
+            staged_path,
+            plugins_dir,
+            plugin_identity,
+            staged_identity,
+            _plugin_runtime_config_files(plugin_id),
+        )
+        try:
+            store.save(
+                _git_installation_source(
+                    plugin_id=plugin_id,
+                    repository_url=repo_url,
+                    source_ref=request.branch,
+                    source_commit=source_commit,
+                    installed_version=new_version,
+                    installed_at=existing_source.installed_at if existing_source is not None else None,
+                )
+            )
+        except Exception:
+            try:
+                _restore_plugin_replacement(plugin_path, backup_path, plugins_dir, runtime_entries)
+            except Exception as rollback_error:
+                logger.critical("Git 插件更新回滚失败", error_type=type(rollback_error).__name__)
+            raise
+        _finalize_plugin_replacement(backup_path)
 
         logger.info("成功更新插件", plugin_id=plugin_id)
         await update_progress(
@@ -1575,6 +2594,7 @@ async def get_installed_plugins(
             return {"success": True, "plugins": []}
 
         installed_plugins = []
+        installation_sources = PluginInstallationStore().list_all()
 
         for plugin_entry in sorted(plugins_dir.iterdir(), key=lambda path: path.name):
             if plugin_entry.is_symlink():
@@ -1645,11 +2665,18 @@ async def get_installed_plugins(
                     except OSError as e:
                         log_exception_type(logger, "写入插件清单 ID 失败", e, level="warning")
 
+                installation_source = _verified_installation_source(
+                    plugin_id,
+                    installation_sources.get(plugin_id),
+                    plugin_path=plugin_path,
+                )
+                installation = _market_installation_response(installation_source)
                 installed_plugins.append(
                     {
                         "id": plugin_id,
                         "manifest": manifest,
                         "path": str(Path("plugins") / folder_name),
+                        "installation": installation.model_dump(mode="json") if installation is not None else None,
                     }
                 )
             except HTTPException:

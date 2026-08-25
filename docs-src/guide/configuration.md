@@ -107,6 +107,7 @@ RiyaBot 的配置分为两个文件，均由程序在首次启动时自动生成
 | `allowed_ips` | 127.0.0.1 | IP 白名单，支持精确 IP、CIDR、通配符 |
 | `trust_xff` | false | 是否解析 X-Forwarded-For |
 | `secure_cookie` | false | 是否启用仅 HTTPS 的安全 Cookie |
+| `plugin_registry_url` | RiyaBot 官方 Registry | 插件市场使用的 HTTPS Registry 地址；浏览器请求不能覆盖 |
 
 ### `[log]` 日志
 

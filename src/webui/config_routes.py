@@ -5,6 +5,7 @@
 import copy
 from dataclasses import fields
 import errno
+import importlib
 import ipaddress
 import os
 from pathlib import Path
@@ -97,7 +98,7 @@ _CONFIG_VALIDATION_DETAIL = "配置数据验证失败，请检查字段和值"
 _CONFIG_FILENAMES = {"bot_config.toml", "model_config.toml"}
 _MISSING_CONFIG_FILE = object()
 _MISSING_ADAPTER_CONFIG = object()
-_MANAGED_ADAPTER_PATHS = {"onebot_default": "plugins/onebot_adapter/config.toml"}
+_ONEBOT_ADAPTER_ID = "onebot_default"
 _ONEBOT_MANAGED_DEFAULTS: dict[str, dict[str, Any]] = {
     "napcat_server": {
         "host": "localhost",
@@ -742,15 +743,44 @@ async def update_model_config_section(
 # ===== 适配器配置管理接口 =====
 
 
-def _get_onebot_runtime_status() -> dict[str, Any]:
-    from plugins.onebot_adapter.adapter_core.runtime import adapter_runtime
+class _ManagedAdapterUnavailable(RuntimeError):
+    """The optional external adapter plugin is not currently installed."""
 
+
+def _get_onebot_plugin_path() -> Path:
+    from src.plugin_system.apis import plugin_manage_api
+
+    try:
+        raw_path = Path(plugin_manage_api.get_plugin_path("onebot_adapter"))
+    except ValueError as exc:
+        raise _ManagedAdapterUnavailable from exc
+
+    external_plugins_root = (Path(PROJECT_ROOT) / "plugins").resolve()
+    try:
+        if raw_path.is_symlink():
+            raise RuntimeError("OneBot adapter path cannot be a symlink")
+        plugin_path = raw_path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise _ManagedAdapterUnavailable from exc
+    except OSError as exc:
+        raise RuntimeError("OneBot adapter path is invalid") from exc
+    if plugin_path.parent != external_plugins_root or not plugin_path.is_dir():
+        raise RuntimeError("OneBot adapter path is outside the external plugin directory")
+    return plugin_path
+
+
+def _import_onebot_module(module_suffix: str):
+    plugin_path = _get_onebot_plugin_path()
+    return importlib.import_module(f"plugins.{plugin_path.name}.{module_suffix}")
+
+
+def _get_onebot_runtime_status() -> dict[str, Any]:
+    adapter_runtime = _import_onebot_module("adapter_core.runtime").adapter_runtime
     return adapter_runtime.get_status()
 
 
 async def _reload_onebot_adapter_config() -> bool:
-    from plugins.onebot_adapter.adapter_core.config import config_manager
-
+    config_manager = _import_onebot_module("adapter_core.config").config_manager
     return await config_manager.reload()
 
 
@@ -771,15 +801,19 @@ async def get_adapter_instances(_auth: bool = Depends(require_auth)):
                 }
             ],
         }
+    except _ManagedAdapterUnavailable:
+        return {"success": True, "adapters": []}
     except Exception as e:
         _log_config_failure("获取适配器实例状态失败", e)
         raise HTTPException(status_code=500, detail="获取适配器状态失败") from e
 
 
 def _get_managed_adapter_path(adapter_id: str) -> str:
+    if adapter_id != _ONEBOT_ADAPTER_ID:
+        raise HTTPException(status_code=404, detail="适配器实例不存在") from None
     try:
-        return _MANAGED_ADAPTER_PATHS[adapter_id]
-    except KeyError:
+        return str(_get_onebot_plugin_path() / "config.toml")
+    except _ManagedAdapterUnavailable:
         raise HTTPException(status_code=404, detail="适配器实例不存在") from None
 
 

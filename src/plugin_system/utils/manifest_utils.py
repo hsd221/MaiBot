@@ -6,12 +6,22 @@
 
 import re
 from typing import Dict, Any, Tuple
+
+from pydantic import ValidationError
+
 from src.common.logger import get_logger
+from src.plugin_system.marketplace import ManifestV2, PLUGIN_SDK_VERSION
 
 # if TYPE_CHECKING:
 #     from src.plugin_system.base.base_plugin import BasePlugin
 
 logger = get_logger("manifest_utils")
+
+_VERSION_PATTERN = re.compile(
+    r"^(?P<core>\d+(?:\.\d+){0,2})"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 
 
 class VersionComparator:
@@ -51,8 +61,11 @@ class VersionComparator:
         if not version:
             return "0.0.0"
 
-        # 兼容正式版和开发版的 SemVer 预发布后缀，插件兼容判断按基础版本比较。
-        normalized = re.sub(r"-(?:snapshot|dev|alpha|beta|rc)(?:[.-]?\d+)?$", "", version.strip(), flags=re.IGNORECASE)
+        # 兼容范围按版本核心比较，忽略合法的预发布和构建元数据。
+        match = _VERSION_PATTERN.fullmatch(version.strip())
+        if match is None:
+            return "0.0.0"
+        normalized = match.group("core")
 
         # 确保版本号格式正确
         if not re.match(r"^\d+(\.\d+){0,2}$", normalized):
@@ -226,7 +239,7 @@ class ManifestValidator:
     # 建议填写的字段（会给出警告但不会导致验证失败）
     RECOMMENDED_FIELDS = ["license", "keywords", "categories"]
 
-    SUPPORTED_MANIFEST_VERSIONS = [1]
+    SUPPORTED_MANIFEST_VERSIONS = [1, 2]
 
     def __init__(self):
         self.validation_errors = []
@@ -243,6 +256,9 @@ class ManifestValidator:
         """
         self.validation_errors.clear()
         self.validation_warnings.clear()
+
+        if manifest_data.get("manifest_version") == 2:
+            return self._validate_v2_manifest(manifest_data)
 
         # 检查必需字段
         for field in self.REQUIRED_FIELDS:
@@ -351,6 +367,36 @@ class ManifestValidator:
                 self.validation_errors.append("plugin_info应为对象格式")
 
         return len(self.validation_errors) == 0
+
+    def _validate_v2_manifest(self, manifest_data: Dict[str, Any]) -> bool:
+        try:
+            manifest = ManifestV2.model_validate(manifest_data)
+        except ValidationError as exc:
+            for error in exc.errors(include_url=False):
+                location = ".".join(str(part) for part in error["loc"])
+                self.validation_errors.append(f"{location}: {error['msg']}")
+            return False
+
+        compatibility_checks = (
+            (
+                "主程序",
+                VersionComparator.get_current_host_version(),
+                manifest.host_application.min_version,
+                manifest.host_application.max_version or "",
+            ),
+            (
+                "插件 SDK",
+                PLUGIN_SDK_VERSION,
+                manifest.sdk.min_version,
+                manifest.sdk.max_version or "",
+            ),
+        )
+        for label, current_version, min_version, max_version in compatibility_checks:
+            compatible, error = VersionComparator.is_version_in_range(current_version, min_version, max_version)
+            if not compatible:
+                self.validation_errors.append(f"{label}兼容性检查失败: {error} (当前版本: {current_version})")
+
+        return not self.validation_errors
 
     def get_validation_report(self) -> str:
         """获取验证报告"""

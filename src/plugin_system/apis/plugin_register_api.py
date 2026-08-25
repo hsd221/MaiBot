@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from src.common.logger import get_logger
+from src.common.logger import get_logger, hash_id
 
 logger = get_logger("plugin_manager")  # 复用plugin_manager名称
 
@@ -39,8 +39,20 @@ def register_plugin(cls):
         logger.error(f"注册 {plugin_name} 无法找到项目根目录")
         return cls
 
+    plugin_path = Path(root_path, *splitted_name).resolve()
+    existing_path = plugin_manager.plugin_paths.get(plugin_name)
+    if existing_path is not None and Path(existing_path).resolve() != plugin_path:
+        logger.error(
+            "插件内部名称冲突，拒绝覆盖已注册插件",
+            event_code="plugin.registration.name_conflict",
+            plugin_name_hash=hash_id(plugin_name),
+            existing_path_hash=hash_id(existing_path),
+            candidate_path_hash=hash_id(plugin_path),
+        )
+        raise ValueError(f"插件名称 '{plugin_name}' 已由其他插件目录注册")
+
     plugin_manager.plugin_classes[plugin_name] = cls
-    plugin_manager.plugin_paths[plugin_name] = str(Path(root_path, *splitted_name).resolve())
+    plugin_manager.plugin_paths[plugin_name] = str(plugin_path)
     logger.debug(f"插件类已注册: {plugin_name}, 路径: {plugin_manager.plugin_paths[plugin_name]}")
 
     return cls

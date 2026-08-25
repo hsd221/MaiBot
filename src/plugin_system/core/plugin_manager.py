@@ -1,4 +1,3 @@
-import json
 import os
 import stat
 
@@ -9,6 +8,7 @@ from pathlib import Path
 
 from src.common.logger import get_logger, hash_id
 from src.plugin_system.base.plugin_base import PluginBase
+from src.plugin_system.marketplace import parse_json_document
 from src.plugin_system.utils.manifest_utils import ManifestValidator, VersionComparator
 from .component_registry import component_registry
 
@@ -409,8 +409,8 @@ class PluginManager:
         if len(raw_manifest) > MAX_PLUGIN_MANIFEST_BYTES:
             raise ValueError("插件清单过大")
         try:
-            manifest_data = json.loads(raw_manifest.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            manifest_data = parse_json_document(raw_manifest.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
             raise ValueError("插件清单格式无效") from exc
         if not isinstance(manifest_data, dict):
             raise ValueError("插件清单格式无效")

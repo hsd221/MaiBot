@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -36,33 +36,41 @@ import {
   Tags,
   Star,
   RefreshCw,
+  ShieldCheck,
+  Trash2,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import type { PluginInfo } from '@/types/plugin'
+import type { PluginInfo, PluginInstallationInfo } from '@/types/plugin'
 import {
-  fetchPluginList,
+  fetchPluginSources,
+  getBoundMarketPlugin,
   checkGitStatus,
   connectPluginProgressWebSocket,
-  installPlugin,
+  installMarketPlugin,
   uninstallPlugin,
-  updatePlugin,
+  updateMarketPlugin,
   getMaimaiVersion,
   isPluginCompatible,
-  getInstalledPlugins,
-  checkPluginInstalled,
-  getInstalledPluginVersion,
   type GitStatus,
   type PluginLoadProgress,
   type MaimaiVersion,
-  type InstalledPlugin,
 } from '@/lib/plugin-api'
 import { useToast } from '@/hooks/use-toast'
 import { Progress } from '@/components/ui/progress'
-import { PluginStats } from '@/components/plugin-stats'
-import { recordPluginDownload, getPluginStats, type PluginStatsData } from '@/lib/plugin-stats'
-import { openExternalLink } from '@/lib/external-link'
-
-const starActiveClass = 'fill-[rgb(255_204_0)] text-[rgb(255_204_0)]'
+import { getSafeExternalUrl, openExternalLink } from '@/lib/external-link'
+import { PluginMarketVersionDialog } from '@/components/plugin-market-version-dialog'
+import {
+  getInstalledMarketRisk,
+  hasVerifiedMarketInstallation,
+  hasSelectableMarketVersion,
+  hasMarketUpdate,
+  isMarketInstallation,
+  isMarketVersionSelectable,
+  mergePluginSources,
+  matchesPluginCategory,
+  matchesPluginCompatibilityPreference,
+  normalizePluginCategory,
+} from '@/lib/plugin-market-ui'
 
 // 分类名称映射
 const CATEGORY_NAMES: Record<string, string> = {
@@ -190,6 +198,21 @@ const PLUGIN_VIEW_OPTIONS: Array<{
 
 const PLUGIN_LOADING_ROWS = ['插件索引', '兼容性信息', '本地安装状态']
 
+function getReviewLevelLabel(reviewLevel: PluginInfo['review_level']): string {
+  if (reviewLevel === 'official') return '官方审核'
+  if (reviewLevel === 'community') return '社区审核'
+  return '非市场插件'
+}
+
+function getInstallMethodLabel(
+  installMethod: PluginInstallationInfo['install_method'] | undefined
+): string {
+  if (installMethod === 'market') return '市场安装'
+  if (installMethod === 'git') return 'Git 安装'
+  if (installMethod === 'upload') return '上传安装'
+  return '本地插件'
+}
+
 function getPluginOperationLabel(progress: PluginLoadProgress) {
   if (progress.operation === 'fetch') return '加载插件列表'
   if (progress.operation === 'install')
@@ -277,9 +300,21 @@ function PluginLoadingState({ progress }: { progress: PluginLoadProgress | null 
   )
 }
 
+async function loadPluginSnapshot(): Promise<{
+  plugins: PluginInfo[]
+  marketError: string | null
+}> {
+  const { marketPlugins, installedPlugins, marketError } = await fetchPluginSources()
+  return {
+    plugins: mergePluginSources(marketPlugins, installedPlugins),
+    marketError,
+  }
+}
+
 export function PluginsPage() {
   const navigate = useNavigate()
   const [selectedPlugin, setSelectedPlugin] = useState<PluginInfo | null>(null)
+  const [versionPlugin, setVersionPlugin] = useState<PluginInfo | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('all')
   const [activeTab, setActiveTab] = useState<PluginViewTab>('all')
@@ -288,44 +323,27 @@ export function PluginsPage() {
   const [plugins, setPlugins] = useState<PluginInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [marketError, setMarketError] = useState<string | null>(null)
+  const [marketRetrying, setMarketRetrying] = useState(false)
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null)
   const [loadProgress, setLoadProgress] = useState<PluginLoadProgress | null>(null)
   const [maimaiVersion, setMaimaiVersion] = useState<MaimaiVersion | null>(null)
-  const [, setInstalledPlugins] = useState<InstalledPlugin[]>([])
-  const [pluginStats, setPluginStats] = useState<Record<string, PluginStatsData>>({})
+  const [actionPluginId, setActionPluginId] = useState<string | null>(null)
+  const [versionLoadingPluginId, setVersionLoadingPluginId] = useState<string | null>(null)
+  const snapshotRequestIdRef = useRef(0)
+  const versionRequestIdRef = useRef(0)
   const { toast } = useToast()
-
-  // 加载插件统计数据
-  const loadPluginStats = async (pluginList: PluginInfo[]) => {
-    const statsPromises = pluginList.map(async (plugin) => {
-      try {
-        const stats = await getPluginStats(plugin.id)
-        return { id: plugin.id, stats }
-      } catch {
-        return { id: plugin.id, stats: null }
-      }
-    })
-
-    const results = await Promise.all(statsPromises)
-    const statsMap: Record<string, PluginStatsData> = {}
-
-    results.forEach(({ id, stats }) => {
-      if (stats) {
-        statsMap[id] = stats
-      }
-    })
-
-    setPluginStats(statsMap)
-  }
+  const selectedAuthorUrl = selectedPlugin?.manifest.author?.url
+    ? getSafeExternalUrl(selectedPlugin.manifest.author.url)
+    : null
 
   // 统一管理 WebSocket 和数据加载
   useEffect(() => {
-    let ws: WebSocket | null = null
     let disconnectWs: (() => void) | null = null
     let isUnmounted = false
+    let clearProgressTimer: number | null = null
 
     const init = async () => {
-      // 1. 先连接 WebSocket
       const progressConnection = connectPluginProgressWebSocket(
         (progress) => {
           if (isUnmounted) return
@@ -334,12 +352,13 @@ export function PluginsPage() {
 
           // 如果加载完成，清除进度
           if (progress.stage === 'success') {
-            setTimeout(() => {
+            if (clearProgressTimer !== null) window.clearTimeout(clearProgressTimer)
+            clearProgressTimer = window.setTimeout(() => {
               if (!isUnmounted) {
                 setLoadProgress(null)
               }
             }, 2000)
-          } else if (progress.stage === 'error') {
+          } else if (progress.stage === 'error' && progress.operation === 'fetch') {
             setLoading(false)
             setError(progress.error || '加载失败')
           }
@@ -355,35 +374,21 @@ export function PluginsPage() {
           }
         }
       )
-      ws = progressConnection.socket
       disconnectWs = progressConnection.disconnect
+      try {
+        setLoading(true)
+        setError(null)
+        const [status, version, snapshot] = await Promise.all([
+          checkGitStatus(),
+          getMaimaiVersion(),
+          loadPluginSnapshot(),
+        ])
+        if (isUnmounted) return
 
-      // 2. 等待 WebSocket 连接建立
-      await new Promise<void>((resolve) => {
-        if (!ws) {
-          resolve()
-          return
-        }
-
-        const checkConnection = () => {
-          if (isUnmounted) {
-            resolve()
-          } else if (ws && ws.readyState === WebSocket.OPEN) {
-            resolve()
-          } else if (ws && ws.readyState === WebSocket.CLOSED) {
-            resolve()
-          } else {
-            setTimeout(checkConnection, 100)
-          }
-        }
-
-        checkConnection()
-      })
-
-      // 3. 检查 Git 状态
-      if (!isUnmounted) {
-        const status = await checkGitStatus()
         setGitStatus(status)
+        setMaimaiVersion(version)
+        setPlugins(snapshot.plugins)
+        setMarketError(snapshot.marketError)
 
         if (!status.installed) {
           toast({
@@ -392,91 +397,18 @@ export function PluginsPage() {
             variant: 'destructive',
           })
         }
-      }
-
-      // 4. 获取主程序版本
-      if (!isUnmounted) {
-        const version = await getMaimaiVersion()
-        setMaimaiVersion(version)
-      }
-
-      // 5. 加载插件列表（包含已安装信息）
-      if (!isUnmounted) {
-        try {
-          setLoading(true)
-          setError(null)
-          const data = await fetchPluginList()
-
-          if (!isUnmounted) {
-            // 获取已安装插件列表
-            const installed = await getInstalledPlugins()
-            setInstalledPlugins(installed)
-
-            // 将已安装信息合并到插件数据中
-            const mergedData = data.map((plugin) => {
-              const isInstalled = checkPluginInstalled(plugin.id, installed)
-              const installedVersion = getInstalledPluginVersion(plugin.id, installed)
-
-              return {
-                ...plugin,
-                installed: isInstalled,
-                installed_version: installedVersion,
-              }
-            })
-
-            // 添加本地安装但不在市场的插件
-            for (const installedPlugin of installed) {
-              const existsInMarket = mergedData.some((p) => p.id === installedPlugin.id)
-              if (!existsInMarket && installedPlugin.manifest) {
-                // 添加本地插件到列表
-                mergedData.push({
-                  id: installedPlugin.id,
-                  manifest: {
-                    manifest_version: installedPlugin.manifest.manifest_version || 1,
-                    name: installedPlugin.manifest.name,
-                    version: installedPlugin.manifest.version,
-                    description: installedPlugin.manifest.description || '',
-                    author: installedPlugin.manifest.author,
-                    license: installedPlugin.manifest.license || 'Unknown',
-                    host_application: installedPlugin.manifest.host_application,
-                    homepage_url: installedPlugin.manifest.homepage_url,
-                    repository_url: installedPlugin.manifest.repository_url,
-                    keywords: installedPlugin.manifest.keywords || [],
-                    categories: installedPlugin.manifest.categories || [],
-                    default_locale: (installedPlugin.manifest.default_locale as string) || 'zh-CN',
-                    locales_path: installedPlugin.manifest.locales_path as string | undefined,
-                  },
-                  downloads: 0,
-                  rating: 0,
-                  review_count: 0,
-                  installed: true,
-                  installed_version: installedPlugin.manifest.version,
-                  published_at: new Date().toISOString(),
-                  updated_at: new Date().toISOString(),
-                })
-              }
-            }
-
-            setPlugins(mergedData)
-
-            // 6. 加载所有插件的统计数据
-            loadPluginStats(mergedData)
-          }
-        } catch (err) {
-          if (!isUnmounted) {
-            const errorMessage = err instanceof Error ? err.message : '加载插件列表失败'
-            setError(errorMessage)
-            toast({
-              title: '加载失败',
-              description: errorMessage,
-              variant: 'destructive',
-            })
-          }
-        } finally {
-          if (!isUnmounted) {
-            setLoading(false)
-          }
+      } catch (err) {
+        if (!isUnmounted) {
+          const errorMessage = err instanceof Error ? err.message : '加载插件列表失败'
+          setError(errorMessage)
+          toast({
+            title: '加载失败',
+            description: errorMessage,
+            variant: 'destructive',
+          })
         }
+      } finally {
+        if (!isUnmounted) setLoading(false)
       }
     }
 
@@ -484,12 +416,26 @@ export function PluginsPage() {
 
     return () => {
       isUnmounted = true
+      if (clearProgressTimer !== null) window.clearTimeout(clearProgressTimer)
       disconnectWs?.()
     }
   }, [toast])
 
   // 获取插件状态徽章
   const getStatusBadge = (plugin: PluginInfo) => {
+    const marketRisk = getInstalledMarketRisk(plugin)
+    if (marketRisk) {
+      return (
+        <Badge
+          variant="destructive"
+          className="gap-1 border-0 bg-[rgb(255_59_48_/_0.14)] text-[color:rgb(201_52_43)] shadow-none dark:text-[color:rgb(255_105_97)]"
+        >
+          <AlertTriangle className="h-3 w-3" />
+          {marketRisk === 'blocked' ? '插件已封禁' : '当前版本已撤回'}
+        </Badge>
+      )
+    }
+
     // 优先显示兼容性状态
     if (!plugin.installed && maimaiVersion && !checkPluginCompatibility(plugin)) {
       return (
@@ -504,34 +450,16 @@ export function PluginsPage() {
     }
 
     if (plugin.installed) {
-      // 版本比较：去除两边空格并进行比较
-      const installedVer = plugin.installed_version?.trim()
-      const marketVer = plugin.manifest.version?.trim()
-
-      if (installedVer !== marketVer) {
-        // 简单的版本比较：只有当市场版本比已安装版本新时才显示"可更新"
-        // 如果本地版本更新（比如手动更新或市场数据过期），则显示"已安装"
-        const installedParts = installedVer?.split('.').map(Number) || [0, 0, 0]
-        const marketParts = marketVer?.split('.').map(Number) || [0, 0, 0]
-
-        // 比较主版本号、次版本号、修订号
-        for (let i = 0; i < 3; i++) {
-          if ((marketParts[i] || 0) > (installedParts[i] || 0)) {
-            // 市场版本更新
-            return (
-              <Badge
-                variant="outline"
-                className="gap-1 border-0 bg-[rgb(255_149_0_/_0.14)] text-[color:rgb(176_96_0)] shadow-none dark:text-[color:rgb(255_208_153)]"
-              >
-                <AlertCircle className="h-3 w-3" />
-                可更新
-              </Badge>
-            )
-          } else if ((marketParts[i] || 0) < (installedParts[i] || 0)) {
-            // 本地版本更新
-            break
-          }
-        }
+      if (hasMarketUpdate(plugin, maimaiVersion)) {
+        return (
+          <Badge
+            variant="outline"
+            className="gap-1 border-0 bg-[rgb(255_149_0_/_0.14)] text-[color:rgb(176_96_0)] shadow-none dark:text-[color:rgb(255_208_153)]"
+          >
+            <AlertCircle className="h-3 w-3" />
+            可更新
+          </Badge>
+        )
       }
 
       return (
@@ -549,6 +477,9 @@ export function PluginsPage() {
 
   // 检查插件兼容性
   const checkPluginCompatibility = (plugin: PluginInfo): boolean => {
+    if (plugin.market_versions && plugin.market_versions.length > 0) {
+      return hasSelectableMarketVersion(plugin, maimaiVersion)
+    }
     if (!maimaiVersion || !plugin.manifest?.host_application) return true
 
     return isPluginCompatible(
@@ -559,30 +490,7 @@ export function PluginsPage() {
   }
 
   // 检查是否需要更新（市场版本比已安装版本新）
-  const needsUpdate = (plugin: PluginInfo): boolean => {
-    if (!plugin.installed || !plugin.installed_version || !plugin.manifest?.version) {
-      return false
-    }
-
-    const installedVer = plugin.installed_version.trim()
-    const marketVer = plugin.manifest.version.trim()
-
-    if (installedVer === marketVer) return false
-
-    const installedParts = installedVer.split('.').map(Number)
-    const marketParts = marketVer.split('.').map(Number)
-
-    // 比较主版本号、次版本号、修订号
-    for (let i = 0; i < 3; i++) {
-      if ((marketParts[i] || 0) > (installedParts[i] || 0)) {
-        return true // 市场版本更新
-      } else if ((marketParts[i] || 0) < (installedParts[i] || 0)) {
-        return false // 本地版本更新
-      }
-    }
-
-    return false
-  }
+  const needsUpdate = (plugin: PluginInfo): boolean => hasMarketUpdate(plugin, maimaiVersion)
 
   const matchesBaseFilters = (plugin: PluginInfo) => {
     // 跳过没有 manifest 的插件
@@ -600,12 +508,14 @@ export function PluginsPage() {
 
     // 分类过滤
     const matchesCategory =
-      categoryFilter === 'all' ||
-      (plugin.manifest.categories && plugin.manifest.categories.includes(categoryFilter))
+      categoryFilter === 'all' || matchesPluginCategory(plugin.manifest.categories, categoryFilter)
 
     // 兼容性过滤
-    const matchesCompatibility =
-      !showCompatibleOnly || !maimaiVersion || checkPluginCompatibility(plugin)
+    const matchesCompatibility = matchesPluginCompatibilityPreference(
+      plugin,
+      showCompatibleOnly && maimaiVersion !== null,
+      checkPluginCompatibility(plugin)
+    )
 
     return matchesSearch && matchesCategory && matchesCompatibility
   }
@@ -635,7 +545,8 @@ export function PluginsPage() {
     return true
   })
 
-  const getPluginCategoryValue = (plugin: PluginInfo) => plugin.manifest?.categories?.[0] || 'Other'
+  const getPluginCategoryValue = (plugin: PluginInfo) =>
+    normalizePluginCategory(plugin.manifest?.categories?.[0] || 'Other')
 
   const getPluginCategoryLabel = (plugin: PluginInfo) => {
     const category = getPluginCategoryValue(plugin)
@@ -650,80 +561,167 @@ export function PluginsPage() {
     )
   }
 
-  const getPluginDownloads = (plugin: PluginInfo) =>
-    (pluginStats[plugin.id]?.downloads ?? plugin.downloads ?? 0).toLocaleString()
-
-  const getPluginRating = (plugin: PluginInfo) =>
-    (pluginStats[plugin.id]?.rating ?? plugin.rating ?? 0).toFixed(1)
-
   // 关闭对话框
   const closeDialog = () => {
+    versionRequestIdRef.current += 1
+    setVersionLoadingPluginId(null)
     setSelectedPlugin(null)
   }
 
-  // 安装插件处理
-  const handleInstall = async (plugin: PluginInfo) => {
+  const refreshPluginData = async () => {
+    const snapshotRequestId = ++snapshotRequestIdRef.current
+    const snapshot = await loadPluginSnapshot().catch((error: unknown) => {
+      if (snapshotRequestId !== snapshotRequestIdRef.current) return null
+      throw error
+    })
+    if (snapshot === null) return null
+    if (snapshotRequestId !== snapshotRequestIdRef.current) return null
+    setPlugins(snapshot.plugins)
+    setMarketError(snapshot.marketError)
+    return snapshot
+  }
+
+  const retryMarketData = async () => {
+    setMarketRetrying(true)
+    try {
+      const snapshot = await refreshPluginData()
+      if (snapshot === null) return
+      if (snapshot.marketError) {
+        toast({
+          title: 'Registry 仍不可用',
+          description: getFriendlyPluginError(snapshot.marketError),
+          variant: 'destructive',
+        })
+      }
+    } catch (error) {
+      toast({
+        title: '插件列表刷新失败',
+        description: error instanceof Error ? error.message : '请稍后重试',
+        variant: 'destructive',
+      })
+    } finally {
+      setMarketRetrying(false)
+    }
+  }
+
+  const refreshAfterPluginMutation = async () => {
+    try {
+      await refreshPluginData()
+    } catch (error) {
+      toast({
+        title: '插件列表刷新失败',
+        description: error instanceof Error ? error.message : '请手动刷新页面查看最新状态',
+        variant: 'destructive',
+      })
+    }
+  }
+
+  const openMarketVersionDialog = async (plugin: PluginInfo) => {
     if (!gitStatus?.installed) {
       toast({
-        title: '无法安装',
+        title: '无法管理版本',
         description: 'Git 未安装',
         variant: 'destructive',
       })
       return
     }
 
-    // 检查插件兼容性
-    if (maimaiVersion && !checkPluginCompatibility(plugin)) {
+    if (plugin.installed && !hasVerifiedMarketInstallation(plugin)) {
       toast({
-        title: '无法安装',
-        description: '插件与当前主程序版本不兼容',
+        title: '无法使用市场版本',
+        description: '该插件没有经过本地校验的市场安装来源。',
         variant: 'destructive',
       })
       return
     }
 
-    try {
-      await installPlugin(plugin.id, plugin.manifest.repository_url || '', 'main')
-
-      // 记录下载统计
-      recordPluginDownload(plugin.id).catch(() => {})
-
-      toast({
-        title: '安装成功',
-        description: `${plugin.manifest.name} 已成功安装`,
-      })
-
-      // 重新加载已安装插件列表
-      const installed = await getInstalledPlugins()
-      setInstalledPlugins(installed)
-
-      // 重新合并已安装信息到插件列表
-      setPlugins((prevPlugins) =>
-        prevPlugins.map((p) => {
-          if (p.id === plugin.id) {
-            const isInstalled = checkPluginInstalled(p.id, installed)
-            const installedVersion = getInstalledPluginVersion(p.id, installed)
-
-            return {
-              ...p,
-              installed: isInstalled,
-              installed_version: installedVersion,
-            }
-          }
-          return p
+    const versionRequestId = ++versionRequestIdRef.current
+    let versionSource = plugin
+    if (plugin.installed) {
+      setVersionLoadingPluginId(plugin.id)
+      try {
+        versionSource = await getBoundMarketPlugin(plugin.id)
+      } catch (error) {
+        if (versionRequestId !== versionRequestIdRef.current) return
+        toast({
+          title: '审核版本加载失败',
+          description: error instanceof Error ? error.message : '绑定的 Registry 暂时不可用',
+          variant: 'destructive',
         })
-      )
+        return
+      } finally {
+        if (versionRequestId === versionRequestIdRef.current) {
+          setVersionLoadingPluginId(null)
+        }
+      }
+    }
+
+    if (versionRequestId !== versionRequestIdRef.current) return
+
+    if (!versionSource.market_versions || versionSource.market_versions.length === 0) {
+      toast({
+        title: '没有审核版本',
+        description: 'Registry 暂未提供可选择的版本。',
+        variant: 'destructive',
+      })
+      return
+    }
+
+    setSelectedPlugin(null)
+    setVersionPlugin(versionSource)
+  }
+
+  const handleMarketVersion = async (plugin: PluginInfo, version: string) => {
+    const release = plugin.market_versions?.find((item) => item.version === version)
+    if (!release || !isMarketVersionSelectable(release, maimaiVersion)) {
+      toast({
+        title: '无法使用此版本',
+        description: '所选版本不可安装或与当前主程序版本不兼容。',
+        variant: 'destructive',
+      })
+      return
+    }
+    if (plugin.installed && !isMarketInstallation(plugin)) {
+      toast({
+        title: '无法使用市场更新',
+        description: '该插件的安装来源不是市场 Registry。',
+        variant: 'destructive',
+      })
+      return
+    }
+
+    setActionPluginId(plugin.id)
+    try {
+      if (plugin.installed) {
+        const result = await updateMarketPlugin(plugin.id, version)
+        toast({
+          title: '版本切换成功',
+          description: `${plugin.manifest.name} 已从 ${result.old_version} 切换到 ${result.new_version}`,
+        })
+      } else {
+        await installMarketPlugin(plugin.id, version)
+        toast({
+          title: '安装成功',
+          description: `${plugin.manifest.name} v${version} 已成功安装`,
+        })
+      }
+
+      setVersionPlugin(null)
+      await refreshAfterPluginMutation()
     } catch (error) {
       toast({
-        title: '安装失败',
+        title: plugin.installed ? '版本切换失败' : '安装失败',
         description: error instanceof Error ? error.message : '未知错误',
         variant: 'destructive',
       })
+    } finally {
+      setActionPluginId(null)
     }
   }
 
   // 卸载插件处理
   const handleUninstall = async (plugin: PluginInfo) => {
+    setActionPluginId(plugin.id)
     try {
       await uninstallPlugin(plugin.id)
 
@@ -732,82 +730,21 @@ export function PluginsPage() {
         description: `${plugin.manifest.name} 已成功卸载`,
       })
 
-      // 重新加载已安装插件列表
-      const installed = await getInstalledPlugins()
-      setInstalledPlugins(installed)
-
-      // 重新合并已安装信息到插件列表
-      setPlugins((prevPlugins) =>
-        prevPlugins.map((p) => {
-          if (p.id === plugin.id) {
-            const isInstalled = checkPluginInstalled(p.id, installed)
-            const installedVersion = getInstalledPluginVersion(p.id, installed)
-
-            return {
-              ...p,
-              installed: isInstalled,
-              installed_version: installedVersion,
-            }
-          }
-          return p
-        })
-      )
+      setSelectedPlugin(null)
+      await refreshAfterPluginMutation()
     } catch (error) {
       toast({
         title: '卸载失败',
         description: error instanceof Error ? error.message : '未知错误',
         variant: 'destructive',
       })
+    } finally {
+      setActionPluginId(null)
     }
   }
 
-  // 更新插件处理
-  const handleUpdate = async (plugin: PluginInfo) => {
-    if (!gitStatus?.installed) {
-      toast({
-        title: '无法更新',
-        description: 'Git 未安装',
-        variant: 'destructive',
-      })
-      return
-    }
-
-    try {
-      const result = await updatePlugin(plugin.id, plugin.manifest.repository_url || '', 'main')
-
-      toast({
-        title: '更新成功',
-        description: `${plugin.manifest.name} 已从 ${result.old_version} 更新到 ${result.new_version}`,
-      })
-
-      // 重新加载已安装插件列表
-      const installed = await getInstalledPlugins()
-      setInstalledPlugins(installed)
-
-      // 重新合并已安装信息到插件列表
-      setPlugins((prevPlugins) =>
-        prevPlugins.map((p) => {
-          if (p.id === plugin.id) {
-            const isInstalled = checkPluginInstalled(p.id, installed)
-            const installedVersion = getInstalledPluginVersion(p.id, installed)
-
-            return {
-              ...p,
-              installed: isInstalled,
-              installed_version: installedVersion,
-            }
-          }
-          return p
-        })
-      )
-    } catch (error) {
-      toast({
-        title: '更新失败',
-        description: error instanceof Error ? error.message : '未知错误',
-        variant: 'destructive',
-      })
-    }
-  }
+  const handleInstall = (plugin: PluginInfo) => void openMarketVersionDialog(plugin)
+  const handleUpdate = (plugin: PluginInfo) => void openMarketVersionDialog(plugin)
 
   return (
     <ScrollArea className="h-full w-full max-w-full overflow-x-hidden">
@@ -882,12 +819,50 @@ export function PluginsPage() {
             </div>
           )}
 
+          {marketError ? (
+            <div
+              role="status"
+              className="ios-group overflow-hidden border-[rgb(255_149_0_/_0.24)] bg-[rgb(255_149_0_/_0.07)]"
+            >
+              <div className="ios-row min-h-[76px] items-start gap-3">
+                <span className="flex min-w-0 items-start gap-3">
+                  <span className="ios-symbol ios-symbol-md ios-symbol-orange">
+                    <AlertTriangle className="h-4 w-4" />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-[15px] font-semibold leading-5 text-[color:rgb(138_75_0)] dark:text-orange-100">
+                      Registry 暂时不可用
+                    </span>
+                    <span className="mt-1 block text-[13px] leading-5 text-[color:rgb(138_75_0_/_0.8)] dark:text-orange-100/80">
+                      {getFriendlyPluginError(marketError)}。已安装插件仍可继续管理。
+                    </span>
+                  </span>
+                </span>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="h-9 w-9 shrink-0"
+                  aria-label="重试加载插件市场"
+                  title="重试加载插件市场"
+                  disabled={marketRetrying}
+                  onClick={() => void retryMarketData()}
+                >
+                  <RefreshCw className={`h-4 w-4 ${marketRetrying ? 'animate-spin' : ''}`} />
+                </Button>
+              </div>
+            </div>
+          ) : null}
+
           {/* 搜索和筛选栏 */}
           <div className="ios-group hidden overflow-hidden sm:block">
             <div className="ios-row ios-row-plain min-h-[68px] gap-4">
               <div className="ios-search-field min-w-0 flex-1">
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
+                  id="plugin-search-desktop"
+                  name="plugin-search-desktop"
+                  aria-label="搜索插件"
                   placeholder="搜索插件..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
@@ -895,7 +870,7 @@ export function PluginsPage() {
                 />
               </div>
               <Select value={categoryFilter} onValueChange={setCategoryFilter}>
-                <SelectTrigger className="h-12 w-full max-w-[220px]">
+                <SelectTrigger aria-label="插件分类" className="h-12 w-full max-w-[220px]">
                   <SelectValue placeholder="选择分类" />
                 </SelectTrigger>
                 <SelectContent>
@@ -930,6 +905,9 @@ export function PluginsPage() {
             <div className="flex min-h-[54px] items-center gap-3 border-b border-border/70 px-4 py-2.5">
               <Search className="h-5 w-5 shrink-0 text-muted-foreground" />
               <Input
+                id="plugin-search-mobile"
+                name="plugin-search-mobile"
+                aria-label="搜索插件"
                 placeholder="搜索插件..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
@@ -1020,7 +998,11 @@ export function PluginsPage() {
           >
             <TabsList className="grid w-full grid-cols-3">
               {PLUGIN_VIEW_OPTIONS.map((item) => (
-                <TabsTrigger key={item.value} value={item.value}>
+                <TabsTrigger
+                  key={item.value}
+                  value={item.value}
+                  aria-controls="plugin-market-results"
+                >
                   <span className="sm:hidden">{item.label}</span>
                   <span className="hidden sm:inline">
                     {item.label} ({getPluginViewCount(item.value)})
@@ -1077,174 +1059,205 @@ export function PluginsPage() {
           )}
 
           {/* 插件列表 */}
-          {loading ? (
-            <PluginLoadingState
-              progress={loadProgress?.stage === 'loading' ? loadProgress : null}
-            />
-          ) : error ? (
-            <div className="ios-group overflow-hidden">
-              <div className="ios-row min-h-[92px] items-start">
-                <span className="flex min-w-0 items-start gap-3">
-                  <span className="ios-symbol ios-symbol-md ios-symbol-red">
-                    <AlertTriangle className="h-4 w-4" />
-                  </span>
-                  <span className="min-w-0">
-                    <span className="block text-[15px] font-medium leading-5">
-                      插件列表加载失败
+          <div id="plugin-market-results" role="tabpanel" aria-label="插件列表" tabIndex={0}>
+            {loading ? (
+              <PluginLoadingState
+                progress={loadProgress?.stage === 'loading' ? loadProgress : null}
+              />
+            ) : error ? (
+              <div className="ios-group overflow-hidden">
+                <div className="ios-row min-h-[92px] items-start">
+                  <span className="flex min-w-0 items-start gap-3">
+                    <span className="ios-symbol ios-symbol-md ios-symbol-red">
+                      <AlertTriangle className="h-4 w-4" />
                     </span>
-                    <span className="block truncate text-[13px] leading-5 text-muted-foreground">
-                      {getFriendlyPluginError(error)}
+                    <span className="min-w-0">
+                      <span className="block text-[15px] font-medium leading-5">
+                        插件列表加载失败
+                      </span>
+                      <span className="block truncate text-[13px] leading-5 text-muted-foreground">
+                        {getFriendlyPluginError(error)}
+                      </span>
                     </span>
                   </span>
-                </span>
-                <Button onClick={() => window.location.reload()} size="sm" variant="outline">
-                  重试
-                </Button>
+                  <Button onClick={() => window.location.reload()} size="sm" variant="outline">
+                    重试
+                  </Button>
+                </div>
               </div>
-            </div>
-          ) : filteredPlugins.length === 0 ? (
-            <div className="ios-group overflow-hidden">
-              <div className="ios-empty-state">
-                <span className="ios-empty-illustration">
-                  <Search className="h-7 w-7 text-primary" />
-                </span>
-                <span className="space-y-1.5">
-                  <span className="block text-[15px] font-semibold leading-5 text-foreground">
-                    未找到插件
+            ) : filteredPlugins.length === 0 ? (
+              <div className="ios-group overflow-hidden">
+                <div className="ios-empty-state">
+                  <span className="ios-empty-illustration">
+                    <Search className="h-7 w-7 text-primary" />
                   </span>
-                  <span className="block text-[13px] leading-5 text-muted-foreground">
-                    {searchQuery || categoryFilter !== 'all'
-                      ? '尝试调整搜索条件或筛选器'
-                      : '暂无可用插件'}
+                  <span className="space-y-1.5">
+                    <span className="block text-[15px] font-semibold leading-5 text-foreground">
+                      未找到插件
+                    </span>
+                    <span className="block text-[13px] leading-5 text-muted-foreground">
+                      {searchQuery || categoryFilter !== 'all'
+                        ? '尝试调整搜索条件或筛选器'
+                        : '暂无可用插件'}
+                    </span>
                   </span>
-                </span>
+                </div>
               </div>
-            </div>
-          ) : (
-            <div className="ios-group overflow-hidden">
-              {filteredPlugins.map((plugin) => (
-                <div
-                  key={plugin.id}
-                  className="ios-row min-h-[104px] min-w-0 items-start py-3 md:min-h-[112px] md:items-center md:py-4"
-                >
-                  <button
-                    type="button"
-                    onClick={() => setSelectedPlugin(plugin)}
-                    className="ios-touch -ml-1 flex min-w-0 flex-1 items-start gap-3 rounded-[14px] p-1 text-left focus-visible:outline-none md:items-center md:gap-4"
-                  >
-                    <span
-                      className={`ios-symbol h-12 w-12 rounded-[13px] md:h-14 md:w-14 md:rounded-[16px] ${getPluginCategoryColor(plugin)}`}
+            ) : (
+              <div className="ios-group overflow-hidden">
+                {filteredPlugins.map((plugin) => {
+                  const marketRisk = getInstalledMarketRisk(plugin)
+                  return (
+                    <div
+                      key={plugin.id}
+                      className="ios-row min-h-[104px] min-w-0 items-start py-3 md:min-h-[112px] md:items-center md:py-4"
                     >
-                      <Tags className="h-5 w-5 md:h-6 md:w-6" />
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="flex min-w-0 flex-wrap items-center gap-2">
-                        <span className="min-w-0 truncate text-[16px] font-semibold leading-6 md:text-[17px]">
-                          {plugin.manifest?.name || plugin.id}
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPlugin(plugin)}
+                        className="ios-touch -ml-1 flex min-w-0 flex-1 items-start gap-3 rounded-[14px] p-1 text-left focus-visible:outline-none md:items-center md:gap-4"
+                      >
+                        <span
+                          className={`ios-symbol h-12 w-12 rounded-[13px] md:h-14 md:w-14 md:rounded-[16px] ${getPluginCategoryColor(plugin)}`}
+                        >
+                          <Tags className="h-5 w-5 md:h-6 md:w-6" />
                         </span>
-                        <span className="hidden shrink-0 md:inline-flex">
-                          {getStatusBadge(plugin)}
-                        </span>
-                      </span>
-                      <span className="mt-0.5 line-clamp-2 text-[13px] leading-[1.45] text-muted-foreground md:max-w-3xl md:text-[14px]">
-                        {plugin.manifest?.description || '无描述'}
-                      </span>
-                      <span className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[12px] leading-4 text-muted-foreground md:text-[13px]">
-                        <span className="truncate">{getPluginCategoryLabel(plugin)}</span>
-                        <span className="shrink-0">v{plugin.manifest?.version || 'unknown'}</span>
-                        <span className="hidden shrink-0 md:inline">
-                          {plugin.manifest?.author?.name || 'Unknown'}
-                        </span>
-                        <span className="inline-flex items-center gap-1">
-                          <Download className="h-3 w-3 shrink-0" />
-                          {getPluginDownloads(plugin)}
-                        </span>
-                        <span className="inline-flex items-center gap-1">
-                          <Star className={`h-3 w-3 shrink-0 ${starActiveClass}`} />
-                          {getPluginRating(plugin)}
-                        </span>
-                      </span>
-                      {plugin.manifest?.keywords && plugin.manifest.keywords.length > 0 && (
-                        <span className="mt-2 hidden flex-wrap gap-1.5 md:flex">
-                          {plugin.manifest.keywords.slice(0, 4).map((keyword) => (
-                            <Badge key={keyword} variant="outline" className="text-xs">
-                              {keyword}
-                            </Badge>
-                          ))}
-                          {plugin.manifest.keywords.length > 4 && (
-                            <Badge variant="outline" className="text-xs">
-                              +{plugin.manifest.keywords.length - 4}
-                            </Badge>
+                        <span className="min-w-0 flex-1">
+                          <span className="flex min-w-0 flex-wrap items-center gap-2">
+                            <span className="min-w-0 truncate text-[16px] font-semibold leading-6 md:text-[17px]">
+                              {plugin.manifest?.name || plugin.id}
+                            </span>
+                            <span
+                              className={`${marketRisk ? 'inline-flex' : 'hidden md:inline-flex'} shrink-0`}
+                            >
+                              {getStatusBadge(plugin)}
+                            </span>
+                          </span>
+                          <span className="mt-0.5 line-clamp-2 text-[13px] leading-[1.45] text-muted-foreground md:max-w-3xl md:text-[14px]">
+                            {plugin.manifest?.description || '无描述'}
+                          </span>
+                          <span className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[12px] leading-4 text-muted-foreground md:text-[13px]">
+                            <span className="truncate">{getPluginCategoryLabel(plugin)}</span>
+                            <span className="shrink-0">
+                              v{plugin.manifest?.version || 'unknown'}
+                            </span>
+                            <span className="hidden shrink-0 md:inline">
+                              {plugin.manifest?.author?.name || 'Unknown'}
+                            </span>
+                            {plugin.review_level ? (
+                              <span className="inline-flex items-center gap-1">
+                                <ShieldCheck className="h-3 w-3 shrink-0" />
+                                {getReviewLevelLabel(plugin.review_level)}
+                              </span>
+                            ) : null}
+                            {plugin.installed ? (
+                              <span className="shrink-0">
+                                {getInstallMethodLabel(plugin.installation?.install_method)}
+                              </span>
+                            ) : null}
+                          </span>
+                          {plugin.manifest?.keywords && plugin.manifest.keywords.length > 0 && (
+                            <span className="mt-2 hidden flex-wrap gap-1.5 md:flex">
+                              {plugin.manifest.keywords.slice(0, 4).map((keyword) => (
+                                <Badge key={keyword} variant="outline" className="text-xs">
+                                  {keyword}
+                                </Badge>
+                              ))}
+                              {plugin.manifest.keywords.length > 4 && (
+                                <Badge variant="outline" className="text-xs">
+                                  +{plugin.manifest.keywords.length - 4}
+                                </Badge>
+                              )}
+                            </span>
                           )}
                         </span>
-                      )}
-                    </span>
-                  </button>
+                      </button>
 
-                  <div className="flex w-[5.75rem] shrink-0 items-start justify-end gap-2 pt-2 md:w-[14rem] md:items-center md:pt-0">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="hidden rounded-full px-4 text-xs font-semibold md:inline-flex"
-                      onClick={() => setSelectedPlugin(plugin)}
-                    >
-                      详情
-                    </Button>
-                    {plugin.installed ? (
-                      needsUpdate(plugin) ? (
-                        <Button
-                          size="sm"
-                          className="min-w-[4.75rem] rounded-full px-4 text-[14px] font-semibold leading-5 shadow-[0_4px_10px_hsl(var(--primary)_/_0.16)] md:min-w-0 md:px-4 md:text-xs"
-                          disabled={!gitStatus?.installed}
-                          title={!gitStatus?.installed ? 'Git 未安装' : undefined}
-                          onClick={() => handleUpdate(plugin)}
-                        >
-                          <RefreshCw className="mr-1 hidden h-4 w-4 md:block" />
-                          更新
-                        </Button>
-                      ) : (
+                      <div className="flex w-[5.75rem] shrink-0 items-start justify-end gap-2 pt-2 md:w-[14rem] md:items-center md:pt-0">
                         <Button
                           variant="outline"
                           size="sm"
-                          className="border-destructive/20 bg-destructive/5 text-destructive hover:bg-destructive/10 hover:text-destructive min-w-[4.75rem] rounded-full px-4 text-[14px] font-semibold leading-5 md:min-w-0 md:px-4 md:text-xs"
-                          disabled={!gitStatus?.installed}
-                          title={!gitStatus?.installed ? 'Git 未安装' : undefined}
-                          onClick={() => handleUninstall(plugin)}
+                          className="hidden rounded-full px-4 text-xs font-semibold md:inline-flex"
+                          onClick={() => setSelectedPlugin(plugin)}
                         >
-                          卸载
+                          详情
                         </Button>
-                      )
-                    ) : (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="bg-primary/12 hover:bg-primary/16 dark:bg-primary/18 dark:hover:bg-primary/22 min-w-[4.75rem] rounded-full px-4 text-[14px] font-semibold leading-5 text-primary shadow-[inset_0_0_0_1px_hsl(var(--primary)_/_0.08)] hover:text-primary active:bg-primary/20 dark:text-[rgb(100_210_255)] md:min-w-0 md:px-4 md:text-xs"
-                        disabled={
-                          !gitStatus?.installed ||
-                          loadProgress?.operation === 'install' ||
-                          (maimaiVersion !== null && !checkPluginCompatibility(plugin))
-                        }
-                        title={
-                          !gitStatus?.installed
-                            ? 'Git 未安装'
-                            : maimaiVersion !== null && !checkPluginCompatibility(plugin)
-                              ? `不兼容当前版本 (需要 ${plugin.manifest?.host_application?.min_version || '未知'}${plugin.manifest?.host_application?.max_version ? ` - ${plugin.manifest.host_application.max_version}` : '+'}，当前 ${maimaiVersion?.version})`
-                              : undefined
-                        }
-                        onClick={() => handleInstall(plugin)}
-                      >
-                        <Download className="mr-1 hidden h-4 w-4 md:block" />
-                        {loadProgress?.operation === 'install' &&
-                        loadProgress?.plugin_id === plugin.id
-                          ? '安装中'
-                          : '获取'}
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+                        {plugin.installed ? (
+                          hasVerifiedMarketInstallation(plugin) ? (
+                            <Button
+                              size="sm"
+                              className="min-w-[4.75rem] rounded-full px-4 text-[14px] font-semibold leading-5 shadow-[0_4px_10px_hsl(var(--primary)_/_0.16)] md:min-w-0 md:px-4 md:text-xs"
+                              disabled={
+                                !gitStatus?.installed ||
+                                actionPluginId !== null ||
+                                versionLoadingPluginId !== null
+                              }
+                              title={!gitStatus?.installed ? 'Git 未安装' : undefined}
+                              onClick={() => handleUpdate(plugin)}
+                            >
+                              <RefreshCw className="mr-1 hidden h-4 w-4 md:block" />
+                              {versionLoadingPluginId === plugin.id
+                                ? '加载中'
+                                : needsUpdate(plugin)
+                                  ? '更新'
+                                  : '版本'}
+                            </Button>
+                          ) : (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="border-destructive/20 bg-destructive/5 text-destructive hover:bg-destructive/10 hover:text-destructive min-w-[4.75rem] rounded-full px-4 text-[14px] font-semibold leading-5 md:min-w-0 md:px-4 md:text-xs"
+                              disabled={!gitStatus?.installed || actionPluginId !== null}
+                              title={!gitStatus?.installed ? 'Git 未安装' : undefined}
+                              onClick={() => handleUninstall(plugin)}
+                            >
+                              卸载
+                            </Button>
+                          )
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="bg-primary/12 hover:bg-primary/16 dark:bg-primary/18 dark:hover:bg-primary/22 min-w-[4.75rem] rounded-full px-4 text-[14px] font-semibold leading-5 text-primary shadow-[inset_0_0_0_1px_hsl(var(--primary)_/_0.08)] hover:text-primary active:bg-primary/20 dark:text-[rgb(100_210_255)] md:min-w-0 md:px-4 md:text-xs"
+                            disabled={
+                              !gitStatus?.installed ||
+                              actionPluginId !== null ||
+                              loadProgress?.operation === 'install' ||
+                              !hasSelectableMarketVersion(plugin, maimaiVersion)
+                            }
+                            title={
+                              !gitStatus?.installed
+                                ? 'Git 未安装'
+                                : !hasSelectableMarketVersion(plugin, maimaiVersion)
+                                  ? '没有兼容且可安装的审核版本'
+                                  : undefined
+                            }
+                            onClick={() => handleInstall(plugin)}
+                          >
+                            <Download className="mr-1 hidden h-4 w-4 md:block" />
+                            {loadProgress?.operation === 'install' &&
+                            loadProgress?.plugin_id === plugin.id
+                              ? '安装中'
+                              : '获取'}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          <PluginMarketVersionDialog
+            plugin={versionPlugin}
+            runtimeVersion={maimaiVersion}
+            busy={versionPlugin?.id === actionPluginId}
+            onOpenChange={(open) => {
+              if (!open) setVersionPlugin(null)
+            }}
+            onConfirm={handleMarketVersion}
+          />
 
           {/* 插件详情对话框 */}
           <Dialog open={selectedPlugin !== null} onOpenChange={closeDialog}>
@@ -1260,11 +1273,13 @@ export function PluginsPage() {
                           </DialogTitle>
                           <DialogDescription>
                             作者: {selectedPlugin.manifest.author?.name || 'Unknown'}
-                            {selectedPlugin.manifest.author?.url && (
+                            {selectedAuthorUrl && (
                               <a
-                                href={selectedPlugin.manifest.author.url}
+                                href={selectedAuthorUrl.href}
                                 target="_blank"
                                 rel="noopener noreferrer"
+                                aria-label="打开作者主页"
+                                title="打开作者主页"
                                 className="ml-2 text-primary hover:underline"
                               >
                                 <ExternalLink className="inline h-3 w-3" />
@@ -1273,6 +1288,12 @@ export function PluginsPage() {
                           </DialogDescription>
                         </div>
                         <div className="flex flex-col gap-2">
+                          {selectedPlugin.review_level ? (
+                            <Badge variant="outline" className="gap-1">
+                              <ShieldCheck className="h-3 w-3" />
+                              {getReviewLevelLabel(selectedPlugin.review_level)}
+                            </Badge>
+                          ) : null}
                           {selectedPlugin.manifest.categories &&
                             selectedPlugin.manifest.categories[0] && (
                               <Badge variant="secondary">
@@ -1286,37 +1307,32 @@ export function PluginsPage() {
                     </DialogHeader>
 
                     <div className="space-y-5 sm:space-y-6">
-                      {/* 插件统计 */}
-                      <div className="hidden sm:block">
-                        <PluginStats pluginId={selectedPlugin.id} />
-                      </div>
-
                       {/* 基本信息 */}
                       <div className="ios-group overflow-hidden">
                         <div className="ios-row min-h-[52px] py-2.5">
-                          <span className="text-[15px] text-muted-foreground">版本</span>
-                          <span className="max-w-[58%] text-right text-[15px] font-medium">
+                          <span className="text-[15px] text-muted-foreground">
+                            {selectedPlugin.review_level ? '最新审核版' : '版本'}
+                          </span>
+                          <span className="max-w-[58%] break-all text-right text-[15px] font-medium">
                             v{selectedPlugin.manifest?.version || 'unknown'}
-                            {selectedPlugin.installed && selectedPlugin.installed_version ? (
-                              <span className="ml-2 text-muted-foreground">
-                                已安装 v{selectedPlugin.installed_version}
-                              </span>
-                            ) : null}
                           </span>
                         </div>
-                        <div className="ios-row min-h-[52px] py-2.5">
-                          <span className="text-[15px] text-muted-foreground">下载量</span>
-                          <span className="text-right text-[15px] font-medium">
-                            {getPluginDownloads(selectedPlugin).toLocaleString()}
-                          </span>
-                        </div>
-                        <div className="ios-row min-h-[52px] py-2.5">
-                          <span className="text-[15px] text-muted-foreground">评分</span>
-                          <span className="flex items-center gap-1 text-right text-[15px] font-medium">
-                            <Star className={`h-4 w-4 ${starActiveClass}`} />
-                            {getPluginRating(selectedPlugin)}
-                          </span>
-                        </div>
+                        {selectedPlugin.installed && selectedPlugin.installed_version ? (
+                          <div className="ios-row min-h-[52px] py-2.5">
+                            <span className="text-[15px] text-muted-foreground">已安装版本</span>
+                            <span className="max-w-[58%] break-all text-right text-[15px] font-medium">
+                              v{selectedPlugin.installed_version}
+                            </span>
+                          </div>
+                        ) : null}
+                        {selectedPlugin.review_level ? (
+                          <div className="ios-row min-h-[52px] py-2.5">
+                            <span className="text-[15px] text-muted-foreground">审核级别</span>
+                            <span className="text-right text-[15px] font-medium">
+                              {getReviewLevelLabel(selectedPlugin.review_level)}
+                            </span>
+                          </div>
+                        ) : null}
                         <div className="ios-row min-h-[52px] py-2.5">
                           <span className="text-[15px] text-muted-foreground">许可证</span>
                           <span className="max-w-[58%] truncate text-right text-[15px] font-medium">
@@ -1334,18 +1350,82 @@ export function PluginsPage() {
                         </div>
                       </div>
 
+                      {selectedPlugin.installed ? (
+                        <div>
+                          <p className="mb-2 text-sm font-medium">安装来源</p>
+                          <div className="ios-group overflow-hidden">
+                            <div className="ios-row min-h-[52px] items-start py-2.5">
+                              <span className="shrink-0 text-[15px] text-muted-foreground">
+                                方式
+                              </span>
+                              <span className="max-w-[68%] break-words text-right text-[15px] font-medium">
+                                {selectedPlugin.installation
+                                  ? getInstallMethodLabel(
+                                      selectedPlugin.installation.install_method
+                                    )
+                                  : '本地插件'}
+                              </span>
+                            </div>
+                            {selectedPlugin.installation?.registry_url ? (
+                              <div className="ios-row min-h-[52px] items-start py-2.5">
+                                <span className="shrink-0 text-[15px] text-muted-foreground">
+                                  绑定 Registry
+                                </span>
+                                <span className="max-w-[68%] break-all text-right font-mono text-[12px] leading-5">
+                                  {selectedPlugin.installation.registry_url}
+                                </span>
+                              </div>
+                            ) : null}
+                            {selectedPlugin.installation?.source_ref ? (
+                              <div className="ios-row min-h-[52px] items-start py-2.5">
+                                <span className="shrink-0 text-[15px] text-muted-foreground">
+                                  Tag / ref
+                                </span>
+                                <span className="max-w-[68%] break-all text-right font-mono text-[13px] leading-5">
+                                  {selectedPlugin.installation.source_ref}
+                                </span>
+                              </div>
+                            ) : null}
+                            {selectedPlugin.installation?.source_commit ? (
+                              <div className="ios-row min-h-[52px] items-start py-2.5">
+                                <span className="shrink-0 text-[15px] text-muted-foreground">
+                                  Commit
+                                </span>
+                                <span className="max-w-[68%] break-all text-right font-mono text-[12px] leading-5">
+                                  {selectedPlugin.installation.source_commit}
+                                </span>
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      ) : null}
+
                       {/* 标签 */}
-                      <div>
-                        <p className="mb-2 text-sm font-medium">关键词</p>
-                        <div className="flex flex-wrap gap-2">
-                          {selectedPlugin.manifest.keywords &&
-                            selectedPlugin.manifest.keywords.map((keyword) => (
+                      {selectedPlugin.manifest.keywords?.length ? (
+                        <div>
+                          <p className="mb-2 text-sm font-medium">关键词</p>
+                          <div className="flex flex-wrap gap-2">
+                            {selectedPlugin.manifest.keywords.map((keyword) => (
                               <Badge key={keyword} variant="outline">
                                 {keyword}
                               </Badge>
                             ))}
+                          </div>
                         </div>
-                      </div>
+                      ) : null}
+
+                      {selectedPlugin.capabilities?.length ? (
+                        <div>
+                          <p className="mb-2 text-sm font-medium">能力声明</p>
+                          <div className="flex flex-wrap gap-2">
+                            {selectedPlugin.capabilities.map((capability) => (
+                              <Badge key={capability} variant="secondary" className="font-mono">
+                                {capability}
+                              </Badge>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
 
                       {/* 详细描述 */}
                       {selectedPlugin.detailed_description && (
@@ -1405,24 +1485,43 @@ export function PluginsPage() {
                       )}
                     </div>
 
-                    <DialogFooter className="hidden sm:flex">
-                      {selectedPlugin.manifest.homepage_url && (
-                        <Button
-                          onClick={() => openExternalLink(selectedPlugin.manifest.homepage_url!)}
-                        >
-                          <ExternalLink className="mr-2 h-4 w-4" />
-                          访问主页
-                        </Button>
-                      )}
-                      {selectedPlugin.manifest.repository_url && (
+                    <DialogFooter className="mt-6 border-t border-border/55 pt-4">
+                      {selectedPlugin.installed ? (
                         <Button
                           variant="outline"
-                          onClick={() => openExternalLink(selectedPlugin.manifest.repository_url!)}
+                          className="border-destructive/20 bg-destructive/5 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          disabled={actionPluginId !== null}
+                          onClick={() => handleUninstall(selectedPlugin)}
                         >
-                          <ExternalLink className="mr-2 h-4 w-4" />
-                          查看仓库
+                          <Trash2 className="mr-2 h-4 w-4" />
+                          卸载
                         </Button>
-                      )}
+                      ) : null}
+                      {(!selectedPlugin.installed ||
+                        hasVerifiedMarketInstallation(selectedPlugin)) &&
+                      (selectedPlugin.installed || selectedPlugin.market_versions?.length) ? (
+                        <Button
+                          disabled={
+                            !gitStatus?.installed ||
+                            actionPluginId !== null ||
+                            versionLoadingPluginId !== null
+                          }
+                          onClick={() => void openMarketVersionDialog(selectedPlugin)}
+                        >
+                          {versionLoadingPluginId === selectedPlugin.id ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : selectedPlugin.installed ? (
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                          ) : (
+                            <Download className="mr-2 h-4 w-4" />
+                          )}
+                          {versionLoadingPluginId === selectedPlugin.id
+                            ? '加载审核版本'
+                            : selectedPlugin.installed
+                              ? '选择版本'
+                              : '选择版本并安装'}
+                        </Button>
+                      ) : null}
                     </DialogFooter>
                   </div>
                 </ScrollArea>

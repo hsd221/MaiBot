@@ -191,6 +191,22 @@ class PluginManagerDirectoryTest(unittest.TestCase):
 
             manager._preflight_plugin_module(plugin_file)
 
+    def test_preflight_plugin_module_rejects_duplicate_manifest_keys(self) -> None:
+        manager = make_manager()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            plugin_dir = Path(tmp_dir) / "duplicate_manifest"
+            plugin_dir.mkdir()
+            plugin_file = plugin_dir / "plugin.py"
+            plugin_file.write_text("# safe plugin entry", encoding="utf-8")
+            (plugin_dir / "_manifest.json").write_text(
+                '{"manifest_version": 2, "manifest_version": 2}',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "插件清单格式无效"):
+                manager._preflight_plugin_module(plugin_file)
+
     def test_plugin_import_failures_do_not_store_or_log_exception_text(self) -> None:
         manager = make_manager()
         secret_text = "api-key-super-secret"

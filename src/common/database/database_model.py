@@ -492,6 +492,25 @@ class ChatHistoryImportTask(BaseModel):
         table_name = "chat_history_import_task"
 
 
+class PluginInstallation(BaseModel):
+    """插件安装来源与当前已安装版本。"""
+
+    plugin_id = TextField(primary_key=True)
+    install_method = TextField()
+    registry_url = TextField(null=True)
+    repository_url = TextField(null=True)
+    source_ref = TextField(null=True)
+    source_commit = TextField(null=True)
+    artifact_sha256 = TextField(null=True)
+    installed_version = TextField()
+    installed_at = DateTimeField()
+    updated_at = DateTimeField()
+    last_checked_at = DateTimeField(null=True)
+
+    class Meta:
+        table_name = "plugin_installation"
+
+
 MODELS = [
     ChatStreams,
     LLMUsage,
@@ -511,6 +530,7 @@ MODELS = [
     BehaviorPattern,
     ChatHistory,
     ChatHistoryImportTask,
+    PluginInstallation,
 ]
 
 

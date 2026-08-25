@@ -26,8 +26,6 @@ logs/
 docker-config/
 plugins/*
 !plugins/__init__.py
-!plugins/onebot_adapter/
-!plugins/onebot_adapter/**
 tests/
 tests/artifacts/
 docs/

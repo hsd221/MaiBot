@@ -1,30 +1,35 @@
-# 📄 插件 Manifest 系统指南
+# 插件 Manifest 指南
 
-## 概述
+每个 RiyaBot 插件目录都必须包含 `_manifest.json`。Manifest 描述插件身份、版本、作者、兼容范围和组件等静态元数据；用户可修改的运行参数仍由插件自己的 `config.toml` 管理。
 
-每个 RiyaBot 插件都必须包含一个 `_manifest.json` 文件，用于描述插件的基本信息、依赖关系和组件等元数据。
+RiyaBot 支持两种 Manifest：
 
-### 配置架构：Manifest 与 Config 的职责分离
+| 版本 | 用途 | 状态 |
+| --- | --- | --- |
+| v1 | 已有插件、本地插件和普通 Git 安装 | 继续兼容 |
+| v2 | 新插件和 Registry 市场插件 | 市场安装强制要求 |
 
-为了避免信息重复、降低维护成本，插件元数据采用**双文件架构**：
+v2 是严格契约。它不会让插件获得沙箱权限，而是为稳定身份、来源校验和兼容性检查提供可验证的数据。
 
-- **`_manifest.json`** — 插件的**静态元数据**
-  - 插件身份信息（名称、版本、描述）
-  - 开发者信息（作者、许可证、仓库）
-  - 系统信息（兼容性、组件列表、分类）
+## 文件边界
 
-- **`config.toml`** — 插件的**运行时配置**
-  - 启用状态（`enabled`）
-  - 功能参数配置
-  - 用户可调整的行为设置
+插件最小目录如下：
 
-这种分离让元数据统一管理、运行时配置灵活调整，各司其职、互不重复。
+```text
+my-plugin/
+├── plugin.py
+└── _manifest.json
+```
 
-## 🔧 Manifest 文件结构
+- `_manifest.json`：静态身份、版本、作者、许可证、URL、兼容范围和能力声明；
+- `config.toml`：启用状态、功能参数和其他运行时配置；
+- `plugin.py`：插件入口。市场插件的 v2 入口固定为该文件。
 
-### 必需字段
+不要把密码、Token、Cookie 或用户配置写入 Manifest。它可能被提交到公开仓库、Registry 和审核日志中。
 
-以下字段是必需的，不能为空：
+## Manifest v1
+
+v1 继续用于兼容已有插件。最小结构为：
 
 ```json
 {
@@ -38,21 +43,20 @@
 }
 ```
 
-### 可选字段
-
-以下字段都是可选的，可以根据需要添加：
+常用可选字段：
 
 ```json
 {
+  "id": "github.alice.my-plugin",
   "license": "MIT",
   "host_application": {
-    "min_version": "1.0.0",
-    "max_version": "4.0.0"
+    "min_version": "0.14.0",
+    "max_version": "0.99.99"
   },
-  "homepage_url": "https://github.com/your-repo",
-  "repository_url": "https://github.com/your-repo",
-  "keywords": ["关键词1", "关键词2"],
-  "categories": ["分类1", "分类2"],
+  "homepage_url": "https://github.com/alice/my-plugin",
+  "repository_url": "https://github.com/alice/my-plugin",
+  "keywords": ["utility"],
+  "categories": ["Utility"],
   "default_locale": "zh-CN",
   "locales_path": "_locales",
   "plugin_info": {
@@ -60,120 +64,171 @@
     "plugin_type": "general",
     "components": [
       {
-        "type": "action",
-        "name": "组件名称",
-        "description": "组件描述"
+        "type": "tool",
+        "name": "lookup",
+        "description": "查询信息"
       }
     ]
   }
 }
 ```
 
-## 🛠️ 校验机制
+v1 校验会拒绝缺少必填字段、作者格式错误和不兼容的主程序版本。缺少 `license`、`keywords` 或 `categories` 只会产生警告。
 
-插件加载时，系统会通过 `ManifestValidator`（位于 `src/plugin_system/utils/manifest_utils.py`）自动读取并校验插件目录下的 `_manifest.json`。校验结果分为两类：
+v1 可以继续加载，但不能作为新的市场版本发布。市场需要稳定 ID、严格 SemVer、SDK 范围和完整来源信息，因此必须使用 v2。
 
-- **错误**（缺少必需字段、字段为空、不支持的 manifest 版本、作者信息缺失等）会导致插件加载失败；
-- **警告**（如未填写 `license`、`keywords` 等建议字段）不会阻止加载。
+## Manifest v2
 
-无需手动运行任何命令行工具——只要把正确的 `_manifest.json` 放在插件目录下，加载时就会自动校验。
+完整示例：
 
-### 常见校验结果
-
-必需字段缺失会产生类似下面的错误，导致插件无法加载：
-
+```json
+{
+  "manifest_version": 2,
+  "id": "github.alice.weather",
+  "name": "天气插件",
+  "version": "1.2.3",
+  "description": "查询天气信息",
+  "author": {
+    "name": "Alice",
+    "url": "https://github.com/alice"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/alice/riyabot-weather",
+    "homepage": "https://github.com/alice/riyabot-weather#readme",
+    "documentation": "https://github.com/alice/riyabot-weather#readme",
+    "issues": "https://github.com/alice/riyabot-weather/issues"
+  },
+  "host_application": {
+    "min_version": "0.14.0",
+    "max_version": "0.99.99"
+  },
+  "sdk": {
+    "min_version": "1.0.0",
+    "max_version": "1.99.99"
+  },
+  "entrypoint": "plugin.py",
+  "capabilities": [
+    "network",
+    "messages.send",
+    "filesystem.plugin_data"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": ["zh-CN"]
+  },
+  "keywords": ["weather"],
+  "categories": ["Utility"],
+  "plugin_info": {
+    "is_built_in": false,
+    "plugin_type": "general",
+    "components": []
+  }
+}
 ```
+
+### 身份和版本
+
+| 字段 | 约束 |
+| --- | --- |
+| `manifest_version` | 固定为 `2` |
+| `id` | 小写、至少三段命名空间，例如 `github.alice.weather` |
+| `name` | 非空显示名称 |
+| `version` | 严格遵循 SemVer 2.0.0，例如 `1.2.3` 或 `1.3.0-beta.1` |
+| `description` | 非空描述 |
+
+推荐使用“托管平台.作者.插件名”作为 ID。每段只能包含小写字母、数字和内部连字符，不能使用下划线。ID 一旦进入 Registry 就代表插件的长期身份，不应随仓库改名、显示名称或版本变化。
+
+### 作者、许可证和 URL
+
+| 字段 | 约束 |
+| --- | --- |
+| `author.name` | 必填 |
+| `author.url` | 可选 HTTPS URL，公开发布时建议填写 |
+| `license` | 必填 |
+| `urls.repository` | 必填 HTTPS 仓库 URL；不允许凭据、查询参数或片段 |
+| `urls.homepage` | 可选 HTTPS URL |
+| `urls.documentation` | 可选 HTTPS URL |
+| `urls.issues` | 可选 HTTPS URL |
+
+Registry 记录中的仓库必须与每个审核版本的 `urls.repository` 完全一致。市场安装不会根据前端提交的新 URL 改变来源。
+
+### 兼容范围
+
+`host_application` 描述主程序范围，`sdk` 描述插件 SDK 范围。两者都必须提供 `min_version`，`max_version` 可省略：
+
+```json
+{
+  "host_application": {
+    "min_version": "0.14.0"
+  },
+  "sdk": {
+    "min_version": "1.0.0",
+    "max_version": "1.99.99"
+  }
+}
+```
+
+版本必须使用严格 SemVer，且最低版本不能高于最高版本。插件加载和市场安装都会根据当前 RiyaBot 与 SDK 版本检查这些范围。
+
+### 入口、能力和国际化
+
+- `entrypoint`：当前固定为 `plugin.py`；
+- `capabilities`：唯一的小写能力名，可使用点号分段，例如 `messages.send`；
+- `i18n.default_locale`：默认语言；
+- `i18n.supported_locales`：支持语言列表，必须包含默认语言；
+- `keywords`、`categories`：可选展示标签；
+- `plugin_info`：可选组件摘要，字段结构与 v1 相同。
+
+`capabilities` 是供用户查看和审核流程使用的声明，不是权限控制。插件仍运行在 RiyaBot 主进程内，可以使用该进程拥有的文件、网络、环境变量和系统权限。
+
+### 严格解析
+
+v2 不接受未声明的额外字段。市场安装还会拒绝重复 JSON 字段，并要求候选插件中的 Manifest 与 Registry 审核快照完全一致。以下任一情况都会拒绝安装：
+
+- Registry ID、Manifest ID 或请求 ID 不一致；
+- Registry 版本与 Manifest 版本不一致；
+- 仓库、Tag 或真实 commit 与审核记录不一致；
+- `plugin.py` 或 `_manifest.json` 不是普通文件；
+- 兼容范围不包含当前主程序或 SDK；
+- 插件目录包含符号链接、特殊文件，或超过市场大小限制。
+
+## 从 v1 迁移到 v2
+
+已有 v1 插件可以继续使用，不需要为了升级 RiyaBot 立即迁移。准备提交市场时按以下顺序迁移：
+
+1. 选择稳定且唯一的三段小写 `id`，发布后不要再更改；
+2. 把 `version` 改为严格 SemVer；
+3. 将 `homepage_url`、`repository_url` 等移动到 `urls` 对象；
+4. 补齐 `license`、`host_application`、`sdk`、`entrypoint` 和 `i18n`；
+5. 根据实际行为声明 `capabilities`；
+6. 确认仓库根目录包含普通文件 `plugin.py` 和 `_manifest.json`；
+7. 为目标版本创建不可变 Tag，并确保 Manifest 版本与 Tag 对应的 Registry 记录一致。
+
+若旧插件曾与其他插件共用 ID，应先为每个插件分配独立 ID。原先在主仓库维护的两个外部插件现已拆到独立仓库，且没有迁入内置插件目录：
+
+- [OneBot/NapCat 适配器](https://github.com/hsd221/riyabot-plugin-onebot-adapter)：`github.hsd221.onebot-adapter`
+- [QQ 收藏表情同步](https://github.com/hsd221/riyabot-plugin-qq-emoji-sync)：`github.hsd221.qq-emoji-sync`
+
+## 校验和排错
+
+RiyaBot 加载插件时会通过 `ManifestValidator` 校验 `_manifest.json`。错误会阻止加载，警告只提示建议补充的 v1 字段。
+
+常见错误包括：
+
+```text
 - 缺少必需字段: name
 - 作者信息缺少name字段或为空
+- 主程序兼容性检查失败
+- id: 市场插件 ID 必须是小写的至少三段命名空间
+- version: 版本必须符合 SemVer 2.0.0
 ```
 
-建议填写但非必需的字段只会产生警告：
+市场安装比普通本地加载多一层 Registry、Tag、commit 和仓库校验。能在本机加载的 v1 插件，不代表它已经满足市场发布要求。
 
-```
-- 建议填写字段: license
-- 建议填写字段: keywords
-```
+## 相关文档
 
-## 🔄 迁移与新建
-
-### 对于现有插件
-
-1. 在插件目录下创建 `_manifest.json`；
-2. 至少填写必需字段（`manifest_version`、`name`、`version`、`description`、`author.name`）；
-3. 重新加载插件，若校验失败按错误提示修正。
-
-### 对于新插件
-
-1. **创建插件目录和基本文件**（放在项目根目录的 `plugins/` 下）；
-2. **手写 `_manifest.json`**，可参考下方的必需/可选字段；
-3. **编写插件代码**；
-4. **启动 RiyaBot**，在日志中确认插件加载成功、manifest 校验通过。
-
-## 📋 字段说明
-
-### 基本信息
-
-- `manifest_version`: manifest 格式版本，当前为 1
-- `name`: 插件显示名称（必需）
-- `version`: 插件版本号（必需）
-- `description`: 插件功能描述（必需）
-- `author`: 作者信息（必需）
-  - `name`: 作者名称（必需）
-  - `url`: 作者主页（可选）
-
-### 许可和 URL
-
-- `license`: 插件许可证（可选，建议填写）
-- `homepage_url`: 插件主页（可选）
-- `repository_url`: 源码仓库地址（可选）
-
-### 分类和标签
-
-- `keywords`: 关键词数组（可选，建议填写）
-- `categories`: 分类数组（可选，建议填写）
-
-### 兼容性
-
-- `host_application`: 主机应用兼容性（可选，建议填写）
-  - `min_version`: 最低兼容版本
-  - `max_version`: 最高兼容版本
-
-⚠️ 不填写时，插件默认支持所有版本。**（由于不同版本对插件系统做过大量重构，实际往往并非如此，建议始终声明。）**
-
-### 国际化
-
-- `default_locale`: 默认语言（可选）
-- `locales_path`: 语言文件目录（可选）
-
-### 插件特定信息
-
-- `plugin_info`: 插件详细信息（可选）
-  - `is_built_in`: 是否为内置插件
-  - `plugin_type`: 插件类型
-  - `components`: 组件列表
-
-## ⚠️ 注意事项
-
-1. **强制要求**：所有插件必须包含 `_manifest.json` 文件，否则无法加载；
-2. **编码格式**：manifest 文件必须使用 UTF-8 编码；
-3. **JSON 格式**：文件必须是有效的 JSON 格式；
-4. **必需字段**：`manifest_version`、`name`、`version`、`description`、`author.name` 是必需的；
-5. **版本兼容**：当前只支持 `manifest_version = 1`。
-
-## 🔍 常见问题
-
-### Q: 可以不填写可选字段吗？
-
-A: 可以。所有标记为"可选"的字段都可以不填写，但建议至少填写 `license` 和 `keywords`。
-
-### Q: manifest 校验失败怎么办？
-
-A: 根据校验器的错误提示修复相应问题。错误会导致插件加载失败，警告不会。
-
-## 📚 参考示例
-
-查看内置插件的 manifest 文件作为参考：
-
-- `src/plugins/built_in/tts_plugin/_manifest.json`
-- `src/plugins/built_in/emoji_plugin/_manifest.json`
-- `src/plugins/built_in/plugin_management/_manifest.json`
+- [插件市场使用指南](../guide/plugin-market.md)
+- [插件快速开始](./quick-start.md)
+- [插件配置指南](./configuration-guide.md)
+- [依赖管理](./dependency-management.md)

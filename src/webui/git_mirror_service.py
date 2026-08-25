@@ -37,9 +37,23 @@ _PROXY_ENV_VARS = {
 }
 _NAT64_WELL_KNOWN_PREFIX = ipaddress.ip_network("64:ff9b::/96")
 _IPV4_COMPATIBLE_PREFIX = ipaddress.ip_network("::/96")
+_PROXY_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
+_BUILT_IN_PUBLIC_GIT_HOSTS = frozenset(
+    {
+        "github.com",
+        "www.github.com",
+        "raw.githubusercontent.com",
+        "gh-proxy.org",
+        "hk.gh-proxy.org",
+        "cdn.gh-proxy.org",
+        "edgeone.gh-proxy.org",
+        "meyzh.github.io",
+    }
+)
 _SCP_LIKE_URL = re.compile(
     r"^(?:(?P<user>[A-Za-z0-9._-]+)@)?(?P<host>\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+):(?P<path>[^\s\x00]+)$"
 )
+_GIT_OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
 class RawFileTooLargeError(ValueError):
@@ -141,6 +155,22 @@ def _is_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -
     return True
 
 
+def _is_allowed_outbound_address(
+    host: str,
+    port: int,
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    if _is_public_address(address):
+        return True
+    normalized_host = _ascii_hostname(host).rstrip(".")
+    return (
+        port == 443
+        and normalized_host in _BUILT_IN_PUBLIC_GIT_HOSTS
+        and isinstance(address, ipaddress.IPv4Address)
+        and address in _PROXY_FAKE_IP_NETWORK
+    )
+
+
 async def validate_outbound_host(host: str, port: int) -> tuple[str, ...]:
     """解析并校验出站地址，返回供请求固定使用的 IP，避免 DNS rebinding。"""
     allow_private = _env_enabled("MAIBOT_ALLOW_PRIVATE_GIT_URLS")
@@ -167,7 +197,7 @@ async def validate_outbound_host(host: str, port: int) -> tuple[str, ...]:
 
     if not addresses:
         raise ValueError("无法解析 Git 服务主机名")
-    if not allow_private and any(not _is_public_address(address) for address in addresses):
+    if not allow_private and any(not _is_allowed_outbound_address(host, port, address) for address in addresses):
         raise ValueError("Git URL 指向私有或本地地址；如需自托管服务，请显式设置 MAIBOT_ALLOW_PRIVATE_GIT_URLS=1")
     return tuple(str(address) for address in addresses)
 
@@ -869,6 +899,7 @@ class GitMirrorService:
         mirror_id: Optional[str] = None,
         custom_url: Optional[str] = None,
         depth: Optional[int] = None,
+        expected_commit: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         克隆 GitHub 仓库
@@ -898,7 +929,14 @@ class GitMirrorService:
 
         if custom_url:
             # 使用自定义 URL
-            return await self._clone_with_url(custom_url, target_path, branch, depth, "custom")
+            return await self._clone_with_url(
+                custom_url,
+                target_path,
+                branch,
+                depth,
+                "custom",
+                expected_commit=expected_commit,
+            )
 
         # 确定要使用的镜像源列表
         if mirror_id:
@@ -913,7 +951,15 @@ class GitMirrorService:
 
         # 依次尝试每个镜像源
         for mirror in mirrors_to_try:
-            result = await self._clone_from_mirror(owner, repo, target_path, branch, depth, mirror)
+            result = await self._clone_from_mirror(
+                owner,
+                repo,
+                target_path,
+                branch,
+                depth,
+                mirror,
+                expected_commit=expected_commit,
+            )
             if result["success"]:
                 return result
             logger.warning("镜像源克隆仓库失败", mirror_id_hash=hash_id(mirror.get("id")))
@@ -929,16 +975,31 @@ class GitMirrorService:
         branch: Optional[str],
         depth: Optional[int],
         mirror: Dict[str, Any],
+        expected_commit: Optional[str] = None,
     ) -> Dict[str, Any]:
         """从指定镜像源克隆仓库"""
         # 构建克隆 URL
         clone_prefix = mirror["clone_prefix"]
         url = f"{clone_prefix}/{owner}/{repo}.git"
 
-        return await self._clone_with_url(url, target_path, branch, depth, mirror["id"])
+        return await self._clone_with_url(
+            url,
+            target_path,
+            branch,
+            depth,
+            mirror["id"],
+            expected_commit=expected_commit,
+        )
 
     async def _clone_with_url(
-        self, url: str, target_path: Path, branch: Optional[str], depth: Optional[int], mirror_type: str
+        self,
+        url: str,
+        target_path: Path,
+        branch: Optional[str],
+        depth: Optional[int],
+        mirror_type: str,
+        *,
+        expected_commit: Optional[str] = None,
     ) -> Dict[str, Any]:
         """使用指定 URL 克隆仓库，支持重试"""
         safe_url = "<redacted-url>"
@@ -955,6 +1016,8 @@ class GitMirrorService:
                 raise ValueError("分支名称格式无效")
             if depth is not None and not 1 <= depth <= 1000:
                 raise ValueError("克隆深度必须在 1 到 1000 之间")
+            if expected_commit is not None and not _GIT_OBJECT_ID_RE.fullmatch(expected_commit):
+                raise ValueError("预期提交格式无效")
         except ValueError as e:
             log_exception_type(logger, "拒绝不安全的 Git 克隆请求", e, level="warning")
             return {
@@ -1069,6 +1132,36 @@ class GitMirrorService:
                 process = await loop.run_in_executor(None, run_git_clone)
 
                 if process.returncode == 0:
+
+                    def resolve_git_head():
+                        return subprocess.run(
+                            ["git", "-C", str(target_path), "rev-parse", "--verify", "HEAD"],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+
+                    head_process = await loop.run_in_executor(None, resolve_git_head)
+                    head_commit = head_process.stdout.strip().lower() if head_process.returncode == 0 else ""
+                    if not _GIT_OBJECT_ID_RE.fullmatch(head_commit):
+                        last_error = "无法确认仓库提交"
+                        logger.warning(
+                            "无法确认克隆仓库的 HEAD",
+                            url_hash=hash_id(safe_url),
+                            return_code=head_process.returncode,
+                        )
+                        _remove_clone_target(target_path)
+                        continue
+                    if expected_commit is not None and head_commit != expected_commit:
+                        last_error = "仓库提交与审核记录不一致"
+                        logger.warning(
+                            "克隆仓库提交与审核记录不一致",
+                            url_hash=hash_id(safe_url),
+                            expected_commit_hash=hash_id(expected_commit),
+                            actual_commit_hash=hash_id(head_commit),
+                        )
+                        _remove_clone_target(target_path)
+                        break
                     logger.info(
                         "成功克隆仓库",
                         url_hash=hash_id(safe_url),
@@ -1082,6 +1175,7 @@ class GitMirrorService:
                         "attempts": attempts,
                         "url": safe_url,
                         "branch": branch or "default",
+                        "commit": head_commit,
                     }
                 else:
                     last_error = "Git 克隆失败"
