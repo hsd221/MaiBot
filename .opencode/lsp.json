@@ -1,9 +1,0 @@
-{
-  "lsp": {
-    "basedpyright": { "priority": 100 },
-    "ruff": { "priority": 90 },
-    "typescript": { "priority": 100 },
-    "bash": { "priority": 100 },
-    "pyright": { "disabled": true }
-  }
-}
