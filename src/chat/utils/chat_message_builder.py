@@ -551,16 +551,16 @@ def _build_readable_messages_internal(
             original_len = len(item.content)
             limit = -1  # 默认不截断
 
-            if percentile < 0.2:  # 60% 之前的消息 (即最旧的 60%)
+            if percentile < 0.2:  # 最旧的 20% 消息
                 limit = 50
                 replace_content = "......（记不清了）"
-            elif percentile < 0.5:  # 60% 之前的消息 (即最旧的 60%)
+            elif percentile < 0.5:  # 20% 到 50% 的消息
                 limit = 100
                 replace_content = "......（有点记不清了）"
-            elif percentile < 0.7:  # 60% 到 80% 之前的消息 (即中间的 20%)
+            elif percentile < 0.7:  # 50% 到 70% 的消息
                 limit = 200
                 replace_content = "......（内容太长了）"
-            elif percentile <= 1.0:  # 80% 到 100% 之前的消息 (即较新的 20%)
+            elif percentile <= 1.0:  # 最新的 30% 消息
                 limit = 400
                 replace_content = "......（内容太长了）"
 
@@ -1082,9 +1082,7 @@ async def build_anonymous_messages(
         # print(f"get_anon_name: platform:{platform}, user_id:{user_id}")
         # print(f"global_config.bot.qq_account:{global_config.bot.qq_account}")
 
-        if (platform == "qq" and user_id == global_config.bot.qq_account) or (
-            platform == "telegram" and user_id == getattr(global_config.bot, "telegram_account", "")
-        ):
+        if is_bot_self(platform, user_id):
             # print("SELF11111111111111")
             return "SELF"
         try:

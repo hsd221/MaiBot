@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import io
+import os
 import json
 import tempfile
 import unittest
@@ -218,6 +219,7 @@ class EmojiHelperFunctionTest(unittest.IsolatedAsyncioTestCase):
             untracked = emoji_dir / "untracked.png"
             tracked.write_bytes(b"tracked")
             untracked.write_bytes(b"untracked")
+            os.utime(untracked, (1, 1))
             objects[0].full_path = str(tracked)
 
             removed_count = await emoji_manager.clean_unused_emojis(str(emoji_dir), objects, 2)

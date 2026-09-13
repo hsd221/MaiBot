@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -79,10 +80,11 @@ class PlanReplyLogger:
     @classmethod
     def _write_json(cls, base_dir: Path, chat_id: str, payload: Dict[str, Any]) -> None:
         chat_dir = base_dir / chat_id
-        chat_dir.mkdir(parents=True, exist_ok=True)
+        chat_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        chat_dir.chmod(0o700)
         file_path = chat_dir / f"{int(time.time() * 1000)}_{uuid4().hex[:8]}.json"
         try:
-            with file_path.open("w", encoding="utf-8") as f:
+            with os.fdopen(os.open(file_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as f:
                 json.dump(cls._safe_data(payload), f, ensure_ascii=False, indent=2)
         finally:
             cls._trim_overflow(chat_dir)

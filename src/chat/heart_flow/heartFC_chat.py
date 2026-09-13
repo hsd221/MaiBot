@@ -43,23 +43,6 @@ if TYPE_CHECKING:
     from src.common.data_models.message_data_model import ReplySetModel
 
 
-ERROR_LOOP_INFO = {
-    "loop_plan_info": {
-        "action_result": {
-            "action_type": "error",
-            "action_data": {},
-            "reasoning": "循环处理失败",
-        },
-    },
-    "loop_action_info": {
-        "action_taken": False,
-        "reply_text": "",
-        "command": "",
-        "taken_time": time.time(),
-    },
-}
-
-
 install(extra_lines=3)
 
 # 注释：原来的动作修改超时常量已移除，因为改为顺序执行
@@ -180,6 +163,7 @@ class HeartFChatting:
     def end_cycle(self, loop_info, cycle_timers):
         self._current_cycle_detail.set_loop_info(loop_info)
         self.history_loop.append(self._current_cycle_detail)
+        del self.history_loop[:-100]
         self._current_cycle_detail.timers = cycle_timers
         self._current_cycle_detail.end_time = time.time()
 
@@ -233,6 +217,8 @@ class HeartFChatting:
             self.last_read_time = batch_end_time
 
         if not decision.should_observe:
+            if decision.should_update_last_read_time and self.message_archiver is not None and recent_messages_list:
+                await self._archive_recent_messages(recent_messages_list)
             await self._wait_for_group_message_or_timeout(decision.sleep_seconds)
             return True
 
@@ -343,7 +329,10 @@ class HeartFChatting:
                 logger.debug(f"{self.log_prefix} ReflectTracker resolved and removed.")
 
         start_time = time.time()
-        async with prompt_manager.async_message_scope(self.chat_stream.context.get_template_name()):
+        self.chat_stream = get_chat_manager().get_stream(self.stream_id) or self.chat_stream
+        self.tool_registry.chat_stream = self.chat_stream
+        context = self.chat_stream.context
+        async with prompt_manager.async_message_scope(context.get_template_name() if context else None):
             # 通过 MessageRecorder 统一提取消息并分发给 expression_learner 和 jargon_miner
             # 在 replyer 执行时触发，统一管理时间窗口，避免重复获取消息
             spawn_background_task(extract_and_distribute_messages(self.stream_id), name="message-distribute")
@@ -589,22 +578,24 @@ class HeartFChatting:
             pass
 
     async def _main_chat_loop(self):
-        """主循环，持续进行计划并可能回复消息，直到被外部取消。"""
+        """Run in one supervised task; back off repeated failures without spawning replacements."""
+        retry_delay = 3
         try:
             while self.running:
-                # 主循环
-                success = await self._loopbody()
-                await asyncio.sleep(0.1)
-                if not success:
-                    break
+                try:
+                    success = await self._loopbody()
+                    retry_delay = 3
+                    await asyncio.sleep(0.1)
+                    if not success:
+                        break
+                except Exception:
+                    logger.exception(f"{self.log_prefix} 聊天循环异常，将于 {retry_delay}s 后重试")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60)
         except asyncio.CancelledError:
-            # 设置了关闭标志位后被取消是正常流程
-            logger.info(f"{self.log_prefix} 麦麦已关闭聊天")
-        except Exception:
-            logger.exception(f"{self.log_prefix} 聊天循环异常，将于3s后尝试重新启动")
-            await asyncio.sleep(3)
-            self._loop_task = asyncio.create_task(self._main_chat_loop())
-        logger.error(f"{self.log_prefix} 结束了当前聊天循环")
+            logger.info(f"{self.log_prefix} 聊天循环已取消")
+        finally:
+            self.running = False
 
     async def _handle_action(
         self,
@@ -644,6 +635,10 @@ class HeartFChatting:
             except Exception as e:
                 logger.error(f"{self.log_prefix} 创建动作处理器时出错: {e}", exc_info=True)
                 return False, ""
+
+            if action_handler is None:
+                logger.warning("动作处理器不可用", action_name=action)
+                return False, "动作处理器不可用"
 
             # 处理动作并获取结果（固定记录一次动作信息）
             result = await action_handler.execute()
@@ -806,7 +801,7 @@ class HeartFChatting:
                         enable_tool=False,
                         request_type="replyer",
                         from_plugin=False,
-                        reply_time_point=action_planner_info.action_data.get("loop_start_time", time.time()),
+                        reply_time_point=(action_planner_info.action_data or {}).get("loop_start_time", time.time()),
                         think_level=think_level,
                     )
 

@@ -541,13 +541,13 @@ def calculate_typing_time(
     """
     计算输入字符串所需的时间，中文和英文字符有不同的输入时间
         input_string (str): 输入的字符串
-        chinese_time (float): 中文字符的输入时间，默认为0.2秒
-        english_time (float): 英文字符的输入时间，默认为0.1秒
+        chinese_time (float): 中文字符的输入时间，默认为0.3秒
+        english_time (float): 英文字符的输入时间，默认为0.15秒
         is_emoji (bool): 是否为emoji，默认为False
 
     特殊情况：
     - 如果只有一个中文字符，将使用3倍的中文输入时间
-    - 在所有输入结束后，额外加上回车时间0.3秒
+    - 单个中文字符另加回车时间0.3秒
     - 如果is_emoji为True，将使用固定1秒的输入时间
     """
     # chinese_time *= 1 / typing_speed_multiplier
@@ -574,7 +574,7 @@ def calculate_typing_time(
     # print(f"nowtime - thinking_start_time:{time.time() - thinking_start_time}")
     # print(f"{total_time}")
 
-    return total_time  # 加上回车时间
+    return total_time
 
 
 def truncate_message(message: str, max_length=20) -> str:
@@ -779,8 +779,17 @@ def record_replyer_action_temp(chat_id: str, reason: str, think_level: int) -> N
         filepath = os.path.join(temp_dir, filename)
 
         # 写入文件
-        with open(filepath, "w", encoding="utf-8") as f:
+        with os.fdopen(os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as f:
             json.dump(record_data, f, ensure_ascii=False, indent=2)
+
+        records = sorted(
+            name for name in os.listdir(temp_dir) if name.startswith("replyer_action_") and name.endswith(".json")
+        )
+        for old_name in records[:-1000]:
+            try:
+                os.remove(os.path.join(temp_dir, old_name))
+            except FileNotFoundError:
+                pass
 
         logger.debug(f"已记录replyer动作选择: chat_id={chat_id}, think_level={think_level}")
     except Exception as e:

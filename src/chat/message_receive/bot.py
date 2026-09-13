@@ -259,7 +259,7 @@ class ChatBot:
                         continue_process,
                     )  # 找到命令，根据intercept_message决定是否继续
 
-                except Exception as e:
+                except Exception:
                     logger.exception(
                         "命令执行异常",
                         event_code="chat.command.execute_failed",
@@ -269,7 +269,8 @@ class ChatBot:
                     )
 
                     success = False
-                    response = str(e)
+                    # Do not expose exception internals to chat participants.
+                    response = "命令执行失败，请稍后重试"
                     intercept_message_level = message.intercept_message_level
                     continue_process = False
                     continue_flag, modified_message = await events_manager.handle_mai_events(
@@ -297,7 +298,7 @@ class ChatBot:
                         if "continue_process" in modified_message.additional_data:
                             continue_process = bool(modified_message.additional_data["continue_process"])
 
-                    if not success and not continue_process and response:
+                    if not success and not continue_process:
                         try:
                             await command_instance.send_text(f"命令执行出错: {response}")
                         except Exception:
@@ -493,7 +494,7 @@ class ChatBot:
             _apply_modified_message(message, modified_message, merge_additional_data=True)
 
             if await self.handle_notice_message(message):
-                pass
+                return
 
             # 处理消息内容，生成纯文本
             await message.process(

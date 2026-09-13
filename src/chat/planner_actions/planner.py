@@ -220,6 +220,8 @@ class ActionPlanner:
             chat_content_block=chat_content_block,
             message_id_list=message_id_list,
         )
+        if not prompt:
+            return []
         from src.plugin_system.base.component_types import EventType
 
         continue_flag, modified_message = await events_manager.handle_mai_events(
@@ -392,7 +394,7 @@ class ActionPlanner:
                 event_code="planner.prompt_build_failed",
                 chat_id=self.chat_id,
             )
-            return "构建 Planner Prompt 时出错", []
+            return "", []
 
     async def _build_planner_memory_context(
         self,
@@ -496,9 +498,9 @@ class ActionPlanner:
                     raise_when_empty=False,
                 )
             except Exception as req_e:
-                logger.error(f"{self.log_prefix}LLM 请求执行失败: {req_e}")
+                logger.error("LLM 请求执行失败", error_type=type(req_e).__name__)
                 duration_ms = (time.perf_counter() - planner_started_at) * 1000
-                return f"LLM 请求失败，模型出现问题: {req_e}", [], llm_content, llm_reasoning, duration_ms
+                return "LLM 请求失败，本轮未生成计划", [], None, None, duration_ms
 
             llm_reasoning = reasoning_content
             normalized_reasoning = (

@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import sys
+import tempfile
 import unittest
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -107,7 +108,9 @@ class AsyncScope:
 
 class MessageStorageTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.db = SqliteDatabase(":memory:")
+        temporary_db = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_db.cleanup)
+        self.db = SqliteDatabase(f"{temporary_db.name}/messages.db")
         self.models = [Messages, Images]
         self.original_dbs = {model: model._meta.database for model in self.models}
         self.db.bind(self.models, bind_refs=False, bind_backrefs=False)
@@ -212,7 +215,7 @@ class MessageStorageTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(MessageStorage._serialize_selected_expressions([1, {"id": 2}]), '[1, {"id": 2}]')
         self.assertEqual(
             MessageStorage.replace_image_descriptions("look [图片：cat] and [图片：missing]"),
-            "look [picid:img-new] and [图片：missing]",
+            "look [图片：cat] and [图片：missing]",
         )
 
     def test_update_message_reports_missing_ids_matches_latest_and_handles_errors(self) -> None:
@@ -931,11 +934,11 @@ class ChatBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             patch.object(bot_module, "global_announcement_manager", announcements),
             patch.object(bot_module, "events_manager", failing_events),
         ):
-            self.assertEqual(await chat_bot._process_commands(message), (True, "boom", False))
+            self.assertEqual(await chat_bot._process_commands(message), (True, "命令执行失败，请稍后重试", False))
 
-        self.assertEqual(FailingCommand.sent_texts, ["命令执行出错: boom"])
+        self.assertEqual(FailingCommand.sent_texts, ["命令执行出错: 命令执行失败，请稍后重试"])
         self.assertEqual(failing_events.calls[1][1]["success"], False)
-        self.assertEqual(failing_events.calls[1][1]["response"], "boom")
+        self.assertEqual(failing_events.calls[1][1]["response"], "命令执行失败，请稍后重试")
 
     async def test_process_commands_after_hook_cancellations_and_outer_failures_are_safe(self) -> None:
         from src.chat.message_receive import bot as bot_module
@@ -1300,8 +1303,10 @@ class UniversalMessageSenderHelpersTest(unittest.IsolatedAsyncioTestCase):
             patch.object(uni_message_sender, "get_global_api", return_value=global_api),
             patch.object(config_module.global_config.maim_message, "enable_api_server", True),
             patch("builtins.__import__", side_effect=import_fake_maim_message),
+            patch.object(uni_message_sender, "logger") as sender_log,
         ):
-            self.assertTrue(await uni_message_sender._send_message(normal_message, show_log=False))
+            self.assertTrue(await uni_message_sender._send_message(normal_message, show_log=True))
+        self.assertNotIn("api-key", str(sender_log.mock_calls))
         self.assertEqual(len(fallback_server.sent), 1)
 
         disabled_api = SimpleNamespace(send_message=AsyncMock(side_effect=legacy_error), extra_server=fallback_server)

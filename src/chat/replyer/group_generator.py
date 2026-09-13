@@ -77,7 +77,7 @@ class DefaultReplyer:
         from_plugin: bool = True,
         stream_id: Optional[str] = None,
         reply_message: Optional[DatabaseMessages] = None,
-        reply_time_point: Optional[float] = time.time(),
+        reply_time_point: Optional[float] = None,
         think_level: int = 1,
         unknown_words: Optional[List[str]] = None,
         log_reply: bool = True,
@@ -786,7 +786,7 @@ class DefaultReplyer:
         available_actions: Optional[Dict[str, ActionInfo]] = None,
         chosen_actions: Optional[List[ActionPlannerInfo]] = None,
         enable_tool: bool = True,
-        reply_time_point: Optional[float] = time.time(),
+        reply_time_point: Optional[float] = None,
         think_level: int = 1,
         unknown_words: Optional[List[str]] = None,
     ) -> Tuple[str, List[int], List[str], str]:
@@ -805,6 +805,8 @@ class DefaultReplyer:
             str: 构建好的上下文
         """
         self._last_retrieved_atom_ids = []
+        if reply_time_point is None:
+            reply_time_point = time.time()
         if available_actions is None:
             available_actions = {}
         chat_stream = self.chat_stream
@@ -1000,6 +1002,7 @@ class DefaultReplyer:
         else:
             reply_target_block = ""
 
+        dialogue_prompt = ""
         if message_list_before_now_long:
             latest_msgs = message_list_before_now_long[-int(global_config.chat.max_context_size) :]
             dialogue_prompt = build_readable_messages(

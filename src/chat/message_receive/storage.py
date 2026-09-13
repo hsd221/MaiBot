@@ -1,6 +1,8 @@
 import re
 import json
-import traceback
+import asyncio
+import contextvars
+import functools
 from typing import Union
 
 from src.common.database.database_model import Messages, Images
@@ -10,6 +12,33 @@ from .message import MessageSending, MessageRecv
 from .recall_registry import recall_registry
 
 logger = get_logger("message_storage")
+
+
+async def _run_durable(func, *args):
+    """Run a blocking write to completion even when the caller is cancelled.
+
+    Cancelling ``asyncio.to_thread`` stops waiting while its worker thread keeps
+    running.  That leaves a durable message write without
+    the follow-up recall reconciliation.  An executor future plus shielding
+    lets us absorb repeated cancellation until the worker result is collected.
+    The second return value tells the caller to propagate cancellation after
+    all required durable work has settled.
+    Worker exceptions are retrieved and propagate to the caller.
+    """
+
+    context = contextvars.copy_context()
+    callback = functools.partial(context.run, func, *args)
+    future = asyncio.get_running_loop().run_in_executor(None, callback)
+    was_cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(future)
+            return result, was_cancelled
+        except asyncio.CancelledError:
+            was_cancelled = True
+            if future.done():
+                return future.result(), was_cancelled
+            continue
 
 
 class MessageStorage:
@@ -51,24 +80,41 @@ class MessageStorage:
     @staticmethod
     async def store_message(message: Union[MessageSending, MessageRecv], chat_stream: ChatStream) -> None:
         """存储消息到数据库"""
+        # 通知消息不存储
+        if isinstance(message, MessageRecv) and message.is_notify:
+            logger.debug("通知消息，跳过存储")
+            return
+
+        # 撤回事件可能先于消息落库抵达，此时数据库无行可标记。
+        # 在写入前拦截，避免已撤回的消息被补写进库。
+        incoming_msg_id = getattr(message.message_info, "message_id", None)
+        if recall_registry.is_recalled(incoming_msg_id):
+            recall_registry.resolve_pending(incoming_msg_id)
+            logger.info(
+                "消息已被撤回，跳过存储",
+                event_code="chat.recall.store_skipped",
+                message_id=incoming_msg_id,
+            )
+            return
+
+        stored, cancelled = await _run_durable(MessageStorage._store_message_sync, message, chat_stream)
+        if stored and recall_registry.is_recalled(message.message_info.message_id):
+            marked, mark_cancelled = await _run_durable(
+                MessageStorage.mark_message_recalled, message.message_info.message_id
+            )
+            cancelled |= mark_cancelled
+            if marked:
+                recall_registry.resolve_pending(message.message_info.message_id)
+        if cancelled:
+            raise asyncio.CancelledError
+        if stored:
+            from .media_background import backfill_stored_message
+
+            await backfill_stored_message(message.message_info.message_id)
+
+    @staticmethod
+    def _store_message_sync(message: Union[MessageSending, MessageRecv], chat_stream: ChatStream) -> bool:
         try:
-            # 通知消息不存储
-            if isinstance(message, MessageRecv) and message.is_notify:
-                logger.debug("通知消息，跳过存储")
-                return
-
-            # 撤回事件可能先于消息落库抵达，此时数据库无行可标记。
-            # 在写入前拦截，避免已撤回的消息被补写进库。
-            incoming_msg_id = getattr(message.message_info, "message_id", None)
-            if recall_registry.is_recalled(incoming_msg_id):
-                recall_registry.resolve_pending(incoming_msg_id)
-                logger.info(
-                    "消息已被撤回，跳过存储",
-                    event_code="chat.recall.store_skipped",
-                    message_id=incoming_msg_id,
-                )
-                return
-
             pattern = r"<MainRule>.*?</MainRule>|<schedule>.*?</schedule>|<UserMessage>.*?</UserMessage>"
 
             # print(message)
@@ -177,10 +223,10 @@ class MessageStorage:
                 ),
                 selected_expressions=selected_expressions,
             )
+            return True
         except Exception:
             logger.exception("存储消息失败")
-            logger.error(f"消息：{message}")
-            traceback.print_exc()
+            return False
 
     # 如果需要其他存储相关的函数，可以在这里添加
     @staticmethod
@@ -245,22 +291,20 @@ class MessageStorage:
     @staticmethod
     def replace_image_descriptions(text: str) -> str:
         """将[图片：描述]替换为[picid:image_id]"""
-        # 先检查文本中是否有图片标记
         pattern = r"\[图片：([^\]]+)\]"
-        matches = re.findall(pattern, text)
-
-        if not matches:
-            logger.debug("文本中没有图片标记，直接返回原文本")
+        descriptions = {match.strip() for match in re.findall(pattern, text)}
+        if not descriptions:
+            return text
+        try:
+            # A description is not an identity. Only resolve an unambiguous match.
+            matches: dict[str, set[str]] = {}
+            for row in Images.select(Images.description, Images.image_id).where(Images.description.in_(descriptions)):
+                matches.setdefault(row.description, set()).add(row.image_id)
+        except Exception:
             return text
 
         def replace_match(match):
-            description = match.group(1).strip()
-            try:
-                image_record = (
-                    Images.select().where(Images.description == description).order_by(Images.timestamp.desc()).first()
-                )
-                return f"[picid:{image_record.image_id}]" if image_record else match.group(0)
-            except Exception:
-                return match.group(0)
+            image_ids = matches.get(match.group(1).strip(), set())
+            return f"[picid:{next(iter(image_ids))}]" if len(image_ids) == 1 else match.group(0)
 
-        return re.sub(r"\[图片：([^\]]+)\]", replace_match, text)
+        return re.sub(pattern, replace_match, text)

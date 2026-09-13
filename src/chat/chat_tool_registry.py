@@ -345,6 +345,8 @@ class ChatToolRegistry:
             args=dict(tool_call.args) if isinstance(tool_call.args, dict) else {},
         )
         try:
+            # get_stream returns snapshots; tools must receive this turn's snapshot.
+            self.executor.chat_stream = self.chat_stream
             result = await self.executor.execute_tool_call(safe_call)
         except Exception:
             logger.exception(f"工具 {tool_call.func_name} 执行失败")

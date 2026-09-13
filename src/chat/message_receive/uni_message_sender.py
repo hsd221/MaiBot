@@ -330,12 +330,10 @@ async def _send_message(message: MessageSending, show_log=True) -> bool:
                         # 检查是否有任何连接发送成功
                         if any(results.values()):
                             if show_log:
-                                logger.info(
-                                    f"已通过API Server Fallback将消息 '{message_preview}' 发往平台'{platform}' (key: {target_api_key})"
-                                )
+                                logger.info(f"已通过API Server Fallback将消息 '{message_preview}' 发往平台'{platform}'")
                             return True
-            except Exception:
-                pass
+            except Exception as fallback_error:
+                logger.warning("API Server 发送回退失败", error_type=type(fallback_error).__name__)
 
             # 如果 Fallback 失败，且存在 legacy 异常，则抛出 legacy 异常
             if legacy_exception:
@@ -439,7 +437,8 @@ class UniversalMessageSender:
             if not continue_flag:
                 logger.info(f"[{chat_id}] 消息发送后续处理被插件取消: {str(message.message_segment)[:100]}...")
                 return True
-            _apply_modified_message(message, modified_message)
+            # Delivery is complete. AFTER_SEND may control follow-up work,
+            # but content changes cannot rewrite what was actually sent.
 
             if storage_message:
                 await self.storage.store_message(message, message.chat_stream)
