@@ -1,6 +1,7 @@
 import re
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Literal, Optional
 import time
 
@@ -13,6 +14,35 @@ from src.config.config_base import ConfigBase
 3. 所有新增的class都应在config.py中的Config类中添加字段
 4. 对于新增的字段，若为可选项，则应在其后添加field()并设置default_factory或default
 """
+
+
+@lru_cache(maxsize=2048)
+def _parse_stream_config_to_chat_id(stream_config_str: str) -> Optional[str]:
+    """复用聊天流的纯 ID 生成入口，避免配置解析时创建聊天管理器和数据库。"""
+    if not isinstance(stream_config_str, str):
+        return None
+    parts = stream_config_str.split(":")
+    if len(parts) != 3:
+        return None
+    platform, account, stream_type = parts
+    if not platform or not account or stream_type not in {"group", "private"}:
+        return None
+    from src.chat.message_receive.chat_stream import ChatManager
+
+    try:
+        return ChatManager.get_stream_id(platform, account, is_group=stream_type == "group")
+    except ValueError:
+        return None
+
+
+def _valid_learning_rule(config_item: object, width: int) -> bool:
+    """旧配置允许未知条目；畸形学习规则沿用忽略并回退到后续规则的语义。"""
+    return (
+        isinstance(config_item, (list, tuple))
+        and len(config_item) >= width
+        and all(isinstance(value, str) for value in config_item[:width])
+        and all(value.lower() in {"enable", "disable"} for value in config_item[1:width])
+    )
 
 
 @dataclass
@@ -28,7 +58,7 @@ class BotConfig(ConfigBase):
     nickname: str
     """昵称"""
 
-    platforms: list[str] = field(default_factory=lambda: ["wx:114514", "xx:1919810"])
+    platforms: list[str] = field(default_factory=list)
     """其他平台列表"""
 
     alias_names: list[str] = field(default_factory=lambda: ["Riya", "小璃"])
@@ -112,25 +142,7 @@ class ChatConfig(ConfigBase):
     llm_quote: bool = False
     """是否在 reply action 中启用 quote 参数，启用后 LLM 可以控制是否引用消息"""
 
-    def _parse_stream_config_to_chat_id(self, stream_config_str: str) -> Optional[str]:
-        """与 ChatStream.get_stream_id 一致地从 "platform:id:type" 生成 chat_id。"""
-        try:
-            parts = stream_config_str.split(":")
-            if len(parts) != 3:
-                return None
-
-            platform = parts[0]
-            id_str = parts[1]
-            stream_type = parts[2]
-
-            is_group = stream_type == "group"
-
-            from src.chat.message_receive.chat_stream import get_chat_manager
-
-            return get_chat_manager().get_stream_id(platform, str(id_str), is_group=is_group)
-
-        except (ValueError, IndexError):
-            return None
+    _parse_stream_config_to_chat_id = staticmethod(_parse_stream_config_to_chat_id)
 
     def _now_minutes(self) -> int:
         """返回本地时间的分钟数(0-1439)。"""
@@ -161,7 +173,7 @@ class ChatConfig(ConfigBase):
         """根据规则返回当前 chat 的动态 talk_value，未匹配则回退到基础值。"""
         if not self.enable_talk_value_rules or not self.talk_value_rules:
             result = self.talk_value
-            # 防止返回0值，自动转换为0.0001
+            # 防止返回0值，自动转换为0.0000001
             if result == 0:
                 return 0.0000001
             return result
@@ -191,7 +203,7 @@ class ChatConfig(ConfigBase):
                 if self._in_range(now_min, start_min, end_min):
                     try:
                         result = float(value)
-                        # 防止返回0值，自动转换为0.0001
+                        # 防止返回0值，自动转换为0.0000001
                         if result == 0:
                             return 0.0000001
                         return result
@@ -214,7 +226,7 @@ class ChatConfig(ConfigBase):
             if self._in_range(now_min, start_min, end_min):
                 try:
                     result = float(value)
-                    # 防止返回0值，自动转换为0.0001
+                    # 防止返回0值，自动转换为0.0000001
                     if result == 0:
                         return 0.0000001
                     return result
@@ -223,7 +235,7 @@ class ChatConfig(ConfigBase):
 
         # 3) 未命中规则返回基础值
         result = self.talk_value
-        # 防止返回0值，自动转换为0.0001
+        # 防止返回0值，自动转换为0.0000001
         if result == 0:
             return 0.0000001
         return result
@@ -409,35 +421,7 @@ class ExpressionConfig(ConfigBase):
     默认值：空列表
     """
 
-    def _parse_stream_config_to_chat_id(self, stream_config_str: str) -> Optional[str]:
-        """
-        解析流配置字符串并生成对应的 chat_id
-
-        Args:
-            stream_config_str: 格式为 "platform:id:type" 的字符串
-
-        Returns:
-            str: 生成的 chat_id，如果解析失败则返回 None
-        """
-        try:
-            parts = stream_config_str.split(":")
-            if len(parts) != 3:
-                return None
-
-            platform = parts[0]
-            id_str = parts[1]
-            stream_type = parts[2]
-
-            # 判断是否为群聊
-            is_group = stream_type == "group"
-
-            # 使用 ChatManager 提供的接口生成 chat_id，避免在此重复实现逻辑
-            from src.chat.message_receive.chat_stream import get_chat_manager
-
-            return get_chat_manager().get_stream_id(platform, str(id_str), is_group=is_group)
-
-        except (ValueError, IndexError):
-            return None
+    _parse_stream_config_to_chat_id = staticmethod(_parse_stream_config_to_chat_id)
 
     def get_expression_config_for_chat(self, chat_stream_id: Optional[str] = None) -> tuple[bool, bool, bool]:
         """
@@ -478,7 +462,7 @@ class ExpressionConfig(ConfigBase):
             tuple: (是否使用表达, 是否学习表达, 是否启用jargon学习)，如果没有配置则返回 None
         """
         for config_item in self.learning_list:
-            if not config_item or len(config_item) < 4:
+            if not _valid_learning_rule(config_item, 4):
                 continue
 
             stream_config_str = config_item[0]  # 例如 "qq:1026294844:group"
@@ -515,7 +499,7 @@ class ExpressionConfig(ConfigBase):
             tuple: (是否使用表达, 是否学习表达, 是否启用jargon学习)，如果没有配置则返回 None
         """
         for config_item in self.learning_list:
-            if not config_item or len(config_item) < 4:
+            if not _valid_learning_rule(config_item, 4):
                 continue
 
             # 检查是否为全局配置（第一个元素为空字符串）
@@ -555,18 +539,7 @@ class BehaviorConfig(ConfigBase):
     格式: [["qq:12345:group", "qq:67890:private"]]
     """
 
-    def _parse_stream_config_to_chat_id(self, stream_config_str: str) -> Optional[str]:
-        try:
-            parts = stream_config_str.split(":")
-            if len(parts) != 3:
-                return None
-            platform, id_str, stream_type = parts
-
-            from src.chat.message_receive.chat_stream import get_chat_manager
-
-            return get_chat_manager().get_stream_id(platform, str(id_str), is_group=stream_type == "group")
-        except (ValueError, IndexError):
-            return None
+    _parse_stream_config_to_chat_id = staticmethod(_parse_stream_config_to_chat_id)
 
     def get_behavior_config_for_chat(self, chat_stream_id: Optional[str] = None) -> tuple[bool, bool]:
         """
@@ -591,7 +564,7 @@ class BehaviorConfig(ConfigBase):
 
     def _get_stream_specific_config(self, chat_stream_id: str) -> Optional[tuple[bool, bool]]:
         for config_item in self.learning_list:
-            if not config_item or len(config_item) < 3:
+            if not _valid_learning_rule(config_item, 3):
                 continue
             stream_config_str = config_item[0]
             if stream_config_str == "":
@@ -607,7 +580,7 @@ class BehaviorConfig(ConfigBase):
 
     def _get_global_config(self) -> Optional[tuple[bool, bool]]:
         for config_item in self.learning_list:
-            if not config_item or len(config_item) < 3:
+            if not _valid_learning_rule(config_item, 3):
                 continue
             if config_item[0] == "":
                 try:
@@ -1008,46 +981,46 @@ class LPMMKnowledgeConfig(ConfigBase):
     """旧模式兼容项：classic 启用按需记忆查询桥，agent 跳过该入口"""
 
     rag_synonym_search_top_k: int = 10
-    """RAG同义词搜索的Top K数量"""
+    """旧配置兼容项，当前未使用。RAG同义词搜索的Top K数量"""
 
     rag_synonym_threshold: float = 0.8
-    """RAG同义词搜索的相似度阈值"""
+    """旧配置兼容项，当前未使用。RAG同义词搜索的相似度阈值"""
 
     info_extraction_workers: int = 3
-    """信息提取工作线程数"""
+    """旧配置兼容项，当前未使用。信息提取工作线程数"""
 
     qa_relation_search_top_k: int = 10
-    """QA关系搜索的Top K数量"""
+    """旧配置兼容项，当前未使用。QA关系搜索的Top K数量"""
 
     qa_relation_threshold: float = 0.5
-    """QA关系搜索的相似度阈值"""
+    """旧配置兼容项，当前未使用。QA关系搜索的相似度阈值"""
 
     qa_paragraph_search_top_k: int = 1000
-    """QA段落搜索的Top K数量"""
+    """旧配置兼容项，当前未使用。QA段落搜索的Top K数量"""
 
     qa_paragraph_node_weight: float = 0.05
-    """QA段落节点权重"""
+    """旧配置兼容项，当前未使用。QA段落节点权重"""
 
     qa_ent_filter_top_k: int = 10
-    """QA实体过滤的Top K数量"""
+    """旧配置兼容项，当前未使用。QA实体过滤的Top K数量"""
 
     qa_ppr_damping: float = 0.8
-    """QA PageRank阻尼系数"""
+    """旧配置兼容项，当前未使用。QA PageRank阻尼系数"""
 
     qa_res_top_k: int = 3
-    """QA最终结果的Top K数量"""
+    """旧配置兼容项，当前未使用。QA最终结果的Top K数量"""
 
     embedding_dimension: int = 1024
-    """嵌入向量维度，应该与模型的输出维度一致"""
+    """旧配置兼容项，当前未使用。嵌入向量维度，应该与模型的输出维度一致"""
 
     max_embedding_workers: int = 3
-    """嵌入/抽取并发线程数"""
+    """旧配置兼容项，当前未使用。嵌入/抽取并发线程数"""
 
     embedding_chunk_size: int = 4
-    """每批嵌入的条数"""
+    """旧配置兼容项，当前未使用。每批嵌入的条数"""
 
     max_synonym_entities: int = 2000
-    """同义边参与的实体数上限，超限则跳过"""
+    """旧配置兼容项，当前未使用。同义边参与的实体数上限，超限则跳过"""
 
     enable_ppr: bool = True
-    """是否启用PPR，低配机器可关闭"""
+    """旧配置兼容项，当前未使用。是否启用PPR，低配机器可关闭"""

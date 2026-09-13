@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from src.config.api_ada_configs import APIProvider, ModelInfo, ModelTaskConfig, TaskConfig
 from src.config.config_base import ConfigBase
+from src.config.official_configs import _parse_stream_config_to_chat_id
 from src.config.official_configs import (
     BehaviorConfig,
     ChatConfig,
@@ -159,7 +160,7 @@ class ConfigBaseTest(unittest.TestCase):
     def test_string_representation_includes_dataclass_fields(self) -> None:
         config = NestedConfig(name="inner", count=2)
 
-        self.assertEqual(str(config), "NestedConfig(name=inner, count=2)")
+        self.assertEqual(str(config), "NestedConfig(name='inner', count=2)")
 
     def test_removed_visual_style_is_ignored_when_loading_legacy_personality_config(self) -> None:
         config = PersonalityConfig.from_dict(
@@ -314,7 +315,10 @@ class OfficialConfigTest(unittest.TestCase):
         )
         config._now_minutes = lambda: 12 * 60 + 30
 
-        with patch("src.chat.message_receive.chat_stream.get_chat_manager", return_value=fake_manager):
+        with patch(
+            "src.chat.message_receive.chat_stream.ChatManager.get_stream_id", side_effect=fake_manager.get_stream_id
+        ):
+            _parse_stream_config_to_chat_id.cache_clear()
             self.assertEqual(config._parse_stream_config_to_chat_id("qq:123:group"), "qq:123:True")
             self.assertEqual(config._parse_stream_config_to_chat_id("qq:999:private"), "qq:999:False")
             self.assertIsNone(config._parse_stream_config_to_chat_id("bad-format"))
@@ -329,7 +333,10 @@ class OfficialConfigTest(unittest.TestCase):
         raising_manager = SimpleNamespace(
             get_stream_id=lambda platform, raw_id, is_group: (_ for _ in ()).throw(ValueError("bad stream"))
         )
-        with patch("src.chat.message_receive.chat_stream.get_chat_manager", return_value=raising_manager):
+        with patch(
+            "src.chat.message_receive.chat_stream.ChatManager.get_stream_id", side_effect=raising_manager.get_stream_id
+        ):
+            _parse_stream_config_to_chat_id.cache_clear()
             self.assertIsNone(config._parse_stream_config_to_chat_id("qq:123:group"))
 
         config._parse_stream_config_to_chat_id = lambda _target: None
@@ -366,7 +373,10 @@ class OfficialConfigTest(unittest.TestCase):
 
         self.assertTrue(ExpressionConfig().vector_selection_enabled)
         self.assertEqual(ExpressionConfig().get_expression_config_for_chat(), (True, True, True))
-        with patch("src.chat.message_receive.chat_stream.get_chat_manager", return_value=fake_manager):
+        with patch(
+            "src.chat.message_receive.chat_stream.ChatManager.get_stream_id", side_effect=fake_manager.get_stream_id
+        ):
+            _parse_stream_config_to_chat_id.cache_clear()
             self.assertEqual(config._parse_stream_config_to_chat_id("qq:123:group"), "qq:123:True")
             self.assertIsNone(config._parse_stream_config_to_chat_id("bad-format"))
             self.assertEqual(config.get_expression_config_for_chat("qq:123:True"), (False, True, False))
@@ -375,7 +385,10 @@ class OfficialConfigTest(unittest.TestCase):
         raising_manager = SimpleNamespace(
             get_stream_id=lambda platform, raw_id, is_group: (_ for _ in ()).throw(ValueError("bad stream"))
         )
-        with patch("src.chat.message_receive.chat_stream.get_chat_manager", return_value=raising_manager):
+        with patch(
+            "src.chat.message_receive.chat_stream.ChatManager.get_stream_id", side_effect=raising_manager.get_stream_id
+        ):
+            _parse_stream_config_to_chat_id.cache_clear()
             self.assertIsNone(config._parse_stream_config_to_chat_id("qq:123:group"))
 
         no_match = ExpressionConfig(learning_list=[["bad-format", "enable", "enable", "enable"]])
@@ -406,7 +419,10 @@ class OfficialConfigTest(unittest.TestCase):
         )
 
         self.assertEqual(BehaviorConfig(learning_list=[]).get_behavior_config_for_chat(), (True, True))
-        with patch("src.chat.message_receive.chat_stream.get_chat_manager", return_value=fake_manager):
+        with patch(
+            "src.chat.message_receive.chat_stream.ChatManager.get_stream_id", side_effect=fake_manager.get_stream_id
+        ):
+            _parse_stream_config_to_chat_id.cache_clear()
             self.assertEqual(config._parse_stream_config_to_chat_id("qq:123:private"), "qq:123:False")
             self.assertIsNone(config._parse_stream_config_to_chat_id("bad-format"))
             self.assertEqual(config.get_behavior_config_for_chat("qq:123:False"), (False, True))
@@ -415,7 +431,10 @@ class OfficialConfigTest(unittest.TestCase):
         raising_manager = SimpleNamespace(
             get_stream_id=lambda platform, raw_id, is_group: (_ for _ in ()).throw(ValueError("bad stream"))
         )
-        with patch("src.chat.message_receive.chat_stream.get_chat_manager", return_value=raising_manager):
+        with patch(
+            "src.chat.message_receive.chat_stream.ChatManager.get_stream_id", side_effect=raising_manager.get_stream_id
+        ):
+            _parse_stream_config_to_chat_id.cache_clear()
             self.assertIsNone(config._parse_stream_config_to_chat_id("qq:123:private"))
 
         no_match = BehaviorConfig(learning_list=[["bad-format", "enable", "disable"]])

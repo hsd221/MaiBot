@@ -61,7 +61,7 @@ class ConfigRuntimeHelpersTest(unittest.TestCase):
         model_document = tomlkit.parse(config_module.generate_default_model_config())
 
         expected_bot_values = {
-            ("bot", "platforms"): ["wx:114514", "xx:1919810"],
+            ("bot", "platforms"): [],
             ("bot", "alias_names"): ["Riya", "小璃"],
             ("chat", "max_context_size"): 30,
             ("memory", "agent_timeout_seconds"): 180.0,
@@ -242,16 +242,6 @@ value = 1 # value comment
 
         self.assertEqual(config_module.get_key_comment(FakeValueContainer(), "value"), "# value comment")
 
-        class FakeKey:
-            key = "target"
-            trivia = type("Trivia", (), {"comment": "# key comment"})()
-
-        class FakeKeysContainer:
-            def keys(self):
-                return [FakeKey()]
-
-        with patch.object(config_module, "KeyType", FakeKey):
-            self.assertEqual(config_module.get_key_comment(FakeKeysContainer(), "target"), "# key comment")
         self.assertIsNone(config_module.get_key_comment({}, "missing"))
 
     def test_version_helpers_read_files_documents_and_semver(self) -> None:

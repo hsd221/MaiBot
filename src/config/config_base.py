@@ -78,6 +78,9 @@ class ConfigBase:
             if not isinstance(value, list):
                 raise TypeError(f"Expected an list for {field_type.__name__}, got {type(value).__name__}")
 
+            if not field_type_args:
+                return field_origin_type(value)
+
             if field_origin_type is list:
                 # 如果列表元素类型是ConfigBase的子类，则对每个元素调用from_dict
                 if (
@@ -167,5 +170,5 @@ class ConfigBase:
             raise TypeError(f"Cannot convert {type(value).__name__} to {field_type.__name__}") from e
 
     def __str__(self):
-        """返回配置类的字符串表示"""
-        return f"{self.__class__.__name__}({', '.join(f'{f.name}={getattr(self, f.name)}' for f in fields(self))})"
+        """复用 dataclass repr，尊重包括嵌套配置在内的敏感字段 repr=False。"""
+        return repr(self)

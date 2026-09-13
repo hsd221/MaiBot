@@ -6,7 +6,7 @@ import tempfile
 
 from datetime import datetime
 from tomlkit import TOMLDocument
-from tomlkit.items import Table, KeyType
+from tomlkit.items import Table
 from dataclasses import field, dataclass, fields
 from rich.traceback import install
 from typing import Any, Callable, ClassVar, List, Optional
@@ -229,17 +229,17 @@ def _mark_webui_setup_required(reason: str) -> None:
 
 
 def get_key_comment(toml_table, key):
-    # 获取key的注释（如果有）
-    if hasattr(toml_table, "trivia") and hasattr(toml_table.trivia, "comment"):
-        return toml_table.trivia.comment
+    # 内联注释属于值的 trivia；Table.keys() 返回字符串，不能按 KeyType 枚举判断。
+    if hasattr(toml_table, "get"):
+        item = toml_table.get(key)
+        if item is not None and hasattr(item, "trivia") and item.trivia.comment:
+            return item.trivia.comment
     if hasattr(toml_table, "value") and isinstance(toml_table.value, dict):
         item = toml_table.value.get(key)
         if item is not None and hasattr(item, "trivia"):
             return item.trivia.comment
-    if hasattr(toml_table, "keys"):
-        for k in toml_table.keys():
-            if isinstance(k, KeyType) and k.key == key:  # type: ignore
-                return k.trivia.comment  # type: ignore
+    if hasattr(toml_table, "trivia") and hasattr(toml_table.trivia, "comment"):
+        return toml_table.trivia.comment or None
     return None
 
 
