@@ -54,6 +54,8 @@ export MAIBOT_ALLOW_UNAUTHENTICATED_LEGACY_SERVER=1
 
 以下是最常用的环境变量（完整列表见 `template/template.env`）：
 
+进程已有环境变量优先于项目 `.env`，包括 systemd、Compose 或 `docker run -e` 注入的值；显式注入的空字符串也不会被 `.env` 覆盖。修改部署配置后需要重启。
+
 | 变量 | 默认值 | 用途 |
 |---|---|---|
 | `HOST` | `127.0.0.1` | 旧版消息服务器监听地址；跨主机连接时改为 `0.0.0.0` |

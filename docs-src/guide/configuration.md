@@ -145,8 +145,10 @@ RiyaBot 的配置分为两个文件，均由程序在首次启动时自动生成
 | `api_key` | "" | API 密钥 |
 | `client_type` | openai | 客户端类型 |
 | `max_retry` | 2 | 最大重试次数 |
-| `timeout` | 10 | 超时（秒） |
+| `timeout` | 60 | SDK 请求/读取超时（秒），具体阶段由供应商客户端决定 |
 | `retry_interval` | 10 | 重试间隔（秒） |
+
+已有配置中显式填写的 `timeout` 不会被新缺省值覆盖。配置仍在重启后生效，见[审计修复兼容说明](audit-remediation.md)。
 
 ### 模型 `[[models]]`
 
