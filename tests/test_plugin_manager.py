@@ -394,6 +394,15 @@ class PluginManagerLoadTest(unittest.IsolatedAsyncioTestCase):
             await manager.remove_registered_plugin("")
         self.assertFalse(await manager.remove_registered_plugin("missing"))
 
+        original_class = type("Original", (), {"__module__": "plugins.fixture"})
+        manager.plugin_classes["plugin-a"] = original_class
+        manager.plugin_paths["plugin-a"] = "plugins/fixture"
+
+        def reload_module(*args, **kwargs):
+            manager.plugin_classes["plugin-a"] = type("Updated", (), {"__module__": "plugins.fixture"})
+            return True
+
+        manager._load_plugin_module_file = Mock(side_effect=reload_module)
         manager.remove_registered_plugin = AsyncMock(side_effect=[False, True])
         manager.load_registered_plugin_classes = Mock(return_value=(True, 1))
         self.assertFalse(await manager.reload_registered_plugin("plugin-a"))

@@ -139,6 +139,9 @@ class ComponentRegistry:
             )
             return False
 
+        if not self._valid_component_types(component_info, component_class):
+            return False
+
         self._components[namespaced_name] = component_info  # 注册到通用注册表（使用命名空间化的名称）
         self._components_by_type[component_type][component_name] = component_info  # 类型内部仍使用原名
         self._components_classes[namespaced_name] = component_class
@@ -147,20 +150,12 @@ class ComponentRegistry:
         ret = False
         match component_type:
             case ComponentType.ACTION:
-                assert isinstance(component_info, ActionInfo)
-                assert issubclass(component_class, BaseAction)
                 ret = self._register_action_component(component_info, component_class)
             case ComponentType.COMMAND:
-                assert isinstance(component_info, CommandInfo)
-                assert issubclass(component_class, BaseCommand)
                 ret = self._register_command_component(component_info, component_class)
             case ComponentType.TOOL:
-                assert isinstance(component_info, ToolInfo)
-                assert issubclass(component_class, BaseTool)
                 ret = self._register_tool_component(component_info, component_class)
             case ComponentType.EVENT_HANDLER:
-                assert isinstance(component_info, EventHandlerInfo)
-                assert issubclass(component_class, BaseEventHandler)
                 ret = self._register_event_handler_component(component_info, component_class)
             case _:
                 logger.warning("未知组件类型", event_code="component.type_unknown", component_type=str(component_type))
@@ -176,6 +171,24 @@ class ComponentRegistry:
             component_class=component_class.__name__,
             plugin_name=plugin_name,
         )
+        return True
+
+    @staticmethod
+    def _valid_component_types(component_info: ComponentInfo, component_class: type) -> bool:
+        expected = {
+            ComponentType.ACTION: (ActionInfo, BaseAction),
+            ComponentType.COMMAND: (CommandInfo, BaseCommand),
+            ComponentType.TOOL: (ToolInfo, BaseTool),
+            ComponentType.EVENT_HANDLER: (EventHandlerInfo, BaseEventHandler),
+        }.get(component_info.component_type)
+        if (
+            expected is None
+            or not isinstance(component_info, expected[0])
+            or not isinstance(component_class, type)
+            or not issubclass(component_class, expected[1])
+        ):
+            logger.warning("组件类型无效", event_code="component.invalid_type")
+            return False
         return True
 
     def _register_action_component(self, action_info: ActionInfo, action_class: Type[BaseAction]) -> bool:
@@ -375,22 +388,18 @@ class ComponentRegistry:
                 component_type=component_type.value,
             )
             return False
+        if not self._valid_component_types(target_component_info, target_component_class):
+            return False
         target_component_info.enabled = True
         match component_type:
             case ComponentType.ACTION:
-                assert isinstance(target_component_info, ActionInfo)
                 self._default_actions[component_name] = target_component_info
             case ComponentType.COMMAND:
-                assert isinstance(target_component_info, CommandInfo)
                 pattern = target_component_info.command_pattern
                 self._command_patterns[re.compile(pattern)] = component_name
             case ComponentType.TOOL:
-                assert isinstance(target_component_info, ToolInfo)
-                assert issubclass(target_component_class, BaseTool)
                 self._llm_available_tools[component_name] = target_component_class
             case ComponentType.EVENT_HANDLER:
-                assert isinstance(target_component_info, EventHandlerInfo)
-                assert issubclass(target_component_class, BaseEventHandler)
                 self._enabled_event_handlers[component_name] = target_component_class
                 from .events_manager import events_manager  # 延迟导入防止循环导入问题
 

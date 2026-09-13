@@ -1,5 +1,6 @@
 import os
 import stat
+import sys
 
 from typing import Dict, List, Optional, Tuple, Type, Any
 from importlib.util import spec_from_file_location, module_from_spec
@@ -196,6 +197,36 @@ class PluginManager:
         """
         重载插件模块
         """
+        plugin_dir = self.plugin_paths.get(plugin_name)
+        plugin_class = self.plugin_classes.get(plugin_name)
+        if not plugin_dir or plugin_class is None:
+            return False
+        module_name = plugin_class.__module__
+        previous_classes = dict(self.plugin_classes)
+        previous_paths = dict(self.plugin_paths)
+        previous_modules = {}
+        for loaded_name in list(sys.modules):
+            if loaded_name == module_name or loaded_name.startswith(f"{module_name}."):
+                previous_modules[loaded_name] = sys.modules.pop(loaded_name)
+        for loaded_module in previous_modules.values():
+            cached = getattr(loaded_module, "__cached__", None)
+            if cached and Path(cached).resolve().is_relative_to(Path(plugin_dir).resolve()):
+                Path(cached).unlink(missing_ok=True)
+        if (
+            not self._load_plugin_module_file(
+                str(Path(plugin_dir) / "plugin.py"), module_name=module_name, reload_source=True
+            )
+            or self.plugin_classes.get(plugin_name) is plugin_class
+        ):
+            self.plugin_classes.clear()
+            self.plugin_classes.update(previous_classes)
+            self.plugin_paths.clear()
+            self.plugin_paths.update(previous_paths)
+            for loaded_name in list(sys.modules):
+                if loaded_name == module_name or loaded_name.startswith(f"{module_name}."):
+                    sys.modules.pop(loaded_name)
+            sys.modules.update(previous_modules)
+            return False
         if not await self.remove_registered_plugin(plugin_name):
             return False
         if not self.load_registered_plugin_classes(plugin_name)[0]:
@@ -321,7 +352,9 @@ class PluginManager:
 
         return loaded_count, failed_count
 
-    def _load_plugin_module_file(self, plugin_file: str) -> bool:
+    def _load_plugin_module_file(
+        self, plugin_file: str, *, module_name: str | None = None, reload_source: bool = False
+    ) -> bool:
         # sourcery skip: extract-method
         """加载单个插件模块文件
 
@@ -332,7 +365,7 @@ class PluginManager:
         """
         # 生成模块名
         plugin_path = Path(plugin_file)
-        module_name = ".".join(plugin_path.parent.parts)
+        module_name = module_name or ".".join(plugin_path.parent.parts)
 
         try:
             self._preflight_plugin_module(plugin_path)
@@ -349,7 +382,14 @@ class PluginManager:
 
             module = module_from_spec(spec)
             module.__package__ = module_name  # 设置模块包名
-            spec.loader.exec_module(module)
+            if reload_source:
+                # 强制重新读取入口源码，避免同秒同大小修改仍命中旧 .pyc。
+                source = spec.loader.get_source(module_name)
+                if source is None:
+                    raise ValueError("插件入口不提供可重载源码")
+                exec(compile(source, plugin_file, "exec"), module.__dict__)
+            else:
+                spec.loader.exec_module(module)
 
             logger.debug(
                 "插件模块加载完成",
