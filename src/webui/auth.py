@@ -139,7 +139,7 @@ def get_current_token(
         token = maibot_session
     # 其次从 Header 获取（兼容旧版本）
     elif authorization and authorization.startswith("Bearer "):
-        token = authorization.replace("Bearer ", "")
+        token = authorization.removeprefix("Bearer ")
 
     if not token:
         raise HTTPException(status_code=401, detail="未提供有效的认证信息")
@@ -228,7 +228,7 @@ def verify_auth_token_from_cookie_or_header(
         token = maibot_session
     # 其次从 Header 获取（兼容旧版本）
     elif authorization and authorization.startswith("Bearer "):
-        token = authorization.replace("Bearer ", "")
+        token = authorization.removeprefix("Bearer ")
 
     if not token:
         raise HTTPException(status_code=401, detail="未提供有效的认证信息")

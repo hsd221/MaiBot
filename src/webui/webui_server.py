@@ -2,6 +2,7 @@
 
 import asyncio
 import mimetypes
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -19,8 +20,14 @@ logger = get_logger("webui_server")
 MAX_WEBUI_WS_MESSAGE_BYTES = 256 * 1024
 
 
-def apply_security_headers(response: Response, is_https: bool) -> None:
+def apply_security_headers(response: Response, is_https: bool, request: Request | None = None) -> None:
     """为 WebUI 页面和 API 响应设置统一安全头。"""
+    connect_sources = "'self' https://maibot-plugin-stats.maibot-webui.workers.dev"
+    if request is not None:
+        websocket_origin = str(request.url.replace(scheme="wss" if is_https else "ws", path="", query=""))
+        # Some browsers do not apply 'self' to WebSockets; include only this origin.
+        if re.fullmatch(r"wss?://(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(?::[0-9]+)?", websocket_origin):
+            connect_sources += f" {websocket_origin}"
     response.headers["Content-Security-Policy"] = "; ".join(
         (
             "default-src 'self'",
@@ -32,7 +39,7 @@ def apply_security_headers(response: Response, is_https: bool) -> None:
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data: blob: https:",
             "font-src 'self' data:",
-            "connect-src 'self' https://maibot-plugin-stats.maibot-webui.workers.dev ws: wss:",
+            f"connect-src {connect_sources}",
             "worker-src 'self' blob:",
         )
     )
@@ -176,7 +183,7 @@ class WebUIServer:
         @self.app.middleware("http")
         async def security_headers(request, call_next):
             response = await call_next(request)
-            apply_security_headers(response, is_https=request_uses_https(request))
+            apply_security_headers(response, is_https=request_uses_https(request), request=request)
             return response
 
     def _show_auth_status(self):

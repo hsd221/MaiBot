@@ -14,7 +14,7 @@ from starlette.responses import PlainTextResponse
 
 from src.common.logger import get_logger
 from src.webui.error_utils import log_exception_type
-from src.webui.rate_limiter import should_rate_limit_auth_path
+from src.webui.rate_limiter import get_forwarded_client_ip, should_rate_limit_auth_path
 
 logger = get_logger("webui.anti_crawler")
 
@@ -588,41 +588,7 @@ class AntiCrawlerMiddleware(BaseHTTPMiddleware):
         Returns:
             客户端IP地址
         """
-        # 获取直接连接的客户端IP（用于验证代理）
-        direct_client_ip = None
-        if request.client:
-            direct_client_ip = request.client.host
-
-        # 检查是否信任X-Forwarded-For头
-        # TRUST_XFF 只表示"启用代理解析能力"，但仍要求直连 IP 在 TRUSTED_PROXIES 中
-        use_xff = False
-        if TRUST_XFF and TRUSTED_PROXIES and direct_client_ip:
-            # 只有在启用 TRUST_XFF 且直连 IP 在信任列表中时，才信任 XFF
-            use_xff = self._is_trusted_proxy(direct_client_ip)
-
-        # 如果信任代理，优先从 X-Forwarded-For 获取
-        if use_xff:
-            forwarded_for = request.headers.get("X-Forwarded-For")
-            if forwarded_for:
-                # X-Forwarded-For 可能包含多个IP，取第一个
-                ip = forwarded_for.split(",")[0].strip()
-                # 基本验证IP格式
-                if self._validate_ip(ip):
-                    return ip
-
-        # 从 X-Real-IP 获取（如果信任代理）
-        if use_xff:
-            real_ip = request.headers.get("X-Real-IP")
-            if real_ip:
-                ip = real_ip.strip()
-                if self._validate_ip(ip):
-                    return ip
-
-        # 使用直接连接的客户端IP
-        if direct_client_ip and self._validate_ip(direct_client_ip):
-            return direct_client_ip
-
-        return "unknown"
+        return get_forwarded_client_ip(request, lambda ip: TRUST_XFF and self._is_trusted_proxy(ip))
 
     def _validate_ip(self, ip: str) -> bool:
         """

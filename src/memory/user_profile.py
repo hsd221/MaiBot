@@ -24,7 +24,7 @@
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from src.memory.types import MoodEntry
 
@@ -326,41 +326,46 @@ class ProfileStore:
             if row is None:
                 return None
 
-            stats = _safe_json_loads(row.stats_json, dict)
-            expression_style = stats.pop("_expression_style", "") if isinstance(stats, dict) else ""
-            expression_patterns = stats.pop("_expression_patterns", {}) if isinstance(stats, dict) else {}
-            if not isinstance(expression_patterns, dict):
-                expression_patterns = {}
-            if _is_legacy_expression_analysis(expression_patterns):
-                expression_style = ""
-                expression_patterns = {}
-
-            return UserProfile(
-                user_id=row.user_id,
-                platform=row.platform or LEGACY_PLATFORM,
-                nickname=row.nickname or "",
-                cardname=row.cardname or "",
-                group_nicknames=_safe_json_loads(row.group_nicknames_json, list),
-                person_type=row.person_type or "unknown",
-                identity_source=row.identity_source or "legacy_entity",
-                verification_status=row.verification_status or "unverified",
-                version=row.version,
-                traits=_safe_json_loads(row.traits_json, dict),
-                interests=_safe_json_loads(row.interests_json, list),
-                preferences=_safe_json_loads(row.preferences_json, dict),
-                facts=_safe_json_loads(row.facts_json, dict),
-                stats=stats,
-                expression_style=str(expression_style or ""),
-                expression_patterns=expression_patterns,
-                mood_history=_safe_json_loads(row.mood_history_json, list),
-                impression=row.impression or "",
-                created_at=row.created_at,
-                updated_at=row.updated_at,
-                last_extracted_at=row.last_extracted_at,
-            )
+            return self._profile_from_row(row)
         except Exception as e:
             logger.error(f"加载用户画像失败 ({profile_id}): {e}")
             return None
+
+    @staticmethod
+    def _profile_from_row(row: UserProfileModel) -> UserProfile:
+        """统一单条加载与列表流式加载的序列化规则。"""
+        stats = _safe_json_loads(row.stats_json, dict)
+        expression_style = stats.pop("_expression_style", "") if isinstance(stats, dict) else ""
+        expression_patterns = stats.pop("_expression_patterns", {}) if isinstance(stats, dict) else {}
+        if not isinstance(expression_patterns, dict):
+            expression_patterns = {}
+        if _is_legacy_expression_analysis(expression_patterns):
+            expression_style = ""
+            expression_patterns = {}
+
+        return UserProfile(
+            user_id=row.user_id,
+            platform=row.platform or LEGACY_PLATFORM,
+            nickname=row.nickname or "",
+            cardname=row.cardname or "",
+            group_nicknames=_safe_json_loads(row.group_nicknames_json, list),
+            person_type=row.person_type or "unknown",
+            identity_source=row.identity_source or "legacy_entity",
+            verification_status=row.verification_status or "unverified",
+            version=row.version,
+            traits=_safe_json_loads(row.traits_json, dict),
+            interests=_safe_json_loads(row.interests_json, list),
+            preferences=_safe_json_loads(row.preferences_json, dict),
+            facts=_safe_json_loads(row.facts_json, dict),
+            stats=stats,
+            expression_style=str(expression_style or ""),
+            expression_patterns=expression_patterns,
+            mood_history=_safe_json_loads(row.mood_history_json, list),
+            impression=row.impression or "",
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            last_extracted_at=row.last_extracted_at,
+        )
 
     @staticmethod
     def _resolve_profile_row(profile_id: str, platform: Optional[str] = None) -> Optional[UserProfileModel]:
@@ -555,6 +560,14 @@ class ProfileStore:
         except Exception as e:
             logger.error(f"列出用户画像失败: {e}")
             return []
+
+    def iter_profiles(self, include_non_people: bool = False) -> Iterator[UserProfile]:
+        """一次查询流式加载画像；不缓存整张表或逐个查询画像。"""
+        query = UserProfileModel.select()
+        if not include_non_people:
+            query = query.where(UserProfileModel.person_type == "person")
+        for row in query.order_by(UserProfileModel.updated_at.desc()).iterator():
+            yield self._profile_from_row(row)
 
     def delete_profile(self, profile_id: str) -> None:
         """删除用户画像

@@ -544,7 +544,7 @@ class WebUISecurityHardeningTest(unittest.TestCase):
         content_security_policy = response.headers["Content-Security-Policy"]
         self.assertIn("frame-ancestors 'none'", content_security_policy)
         self.assertIn(
-            "connect-src 'self' https://maibot-plugin-stats.maibot-webui.workers.dev ws: wss:",
+            "connect-src 'self' https://maibot-plugin-stats.maibot-webui.workers.dev",
             content_security_policy,
         )
         self.assertNotIn("http://localhost:8001", content_security_policy)

@@ -513,8 +513,11 @@ async def delete_emoji(
         # 记录删除信息
         emoji_hash = emoji.emoji_hash
 
-        # 执行删除
-        emoji.delete_instance()
+        # 通过管理器删除源记录、文件和可用的向量索引。
+        from src.chat.emoji_system.emoji_manager import get_emoji_manager
+
+        if not await get_emoji_manager().delete_emoji(emoji_hash):
+            raise HTTPException(status_code=500, detail="删除表情包失败，请稍后重试")
 
         logger.info("表情包已删除", emoji_id=emoji_id, emoji_hash=hash_id(emoji_hash))
 
@@ -783,6 +786,9 @@ async def batch_delete_emojis(
         if not request.emoji_ids:
             raise HTTPException(status_code=400, detail="未提供要删除的表情包ID")
 
+        from src.chat.emoji_system.emoji_manager import get_emoji_manager
+
+        manager = get_emoji_manager()
         deleted_count = 0
         failed_count = 0
         failed_ids = []
@@ -790,8 +796,7 @@ async def batch_delete_emojis(
         for emoji_id in request.emoji_ids:
             try:
                 emoji = Emoji.get_or_none(Emoji.id == emoji_id)
-                if emoji:
-                    emoji.delete_instance()
+                if emoji and await manager.delete_emoji(emoji.emoji_hash):
                     deleted_count += 1
                     logger.info("批量删除表情包条目", emoji_id=emoji_id)
                 else:

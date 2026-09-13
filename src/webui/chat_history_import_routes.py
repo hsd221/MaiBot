@@ -987,13 +987,31 @@ async def delete_chat_history_import(
     if task.status == "running":
         if task.progress_stage in _NON_CANCELLABLE_PROGRESS_STAGES:
             raise HTTPException(status_code=409, detail="学习结果正在提交，完成后才能删除任务")
-        task.cancel_requested = True
-        task.updated_at = time.time()
-        task.save()
+        updated = (
+            ChatHistoryImportTask.update(cancel_requested=True, updated_at=time.time())
+            .where(
+                (ChatHistoryImportTask.import_id == import_id)
+                & (ChatHistoryImportTask.status == "running")
+                & ChatHistoryImportTask.progress_stage.not_in(_NON_CANCELLABLE_PROGRESS_STAGES)
+            )
+            .execute()
+        )
+        if updated != 1:
+            raise HTTPException(status_code=409, detail="任务状态已变化，请刷新后重试")
         if running is not None and not running.done():
             running.cancel()
         return ChatHistoryImportDeleteResponse(success=True, message="已请求取消导入任务")
 
+    deleted = (
+        ChatHistoryImportTask.delete()
+        .where(
+            (ChatHistoryImportTask.import_id == import_id)
+            & (ChatHistoryImportTask.status == task.status)
+            & (ChatHistoryImportTask.updated_at == task.updated_at)
+        )
+        .execute()
+    )
+    if deleted != 1:
+        raise HTTPException(status_code=409, detail="任务状态已变化，请刷新后重试")
     _cleanup_task_files(import_id)
-    task.delete_instance()
     return ChatHistoryImportDeleteResponse(success=True, message="导入任务已删除")

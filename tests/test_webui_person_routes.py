@@ -17,6 +17,9 @@ class FakeProfileStore:
     def list_profiles(self) -> list[str]:
         return list(self.profiles.keys())
 
+    def iter_profiles(self):
+        return iter(self.profiles.values())
+
     def get_profile(self, user_id: str) -> UserProfile | None:
         return self.profiles.get(user_id)
 
@@ -272,7 +275,7 @@ class PersonRouteEndpointTest(unittest.IsolatedAsyncioTestCase):
         secret = 'profile secret at /private/user_profiles.db: token="super-secret"'
 
         with (
-            patch.object(person_routes, "list_profile_person_dicts", side_effect=RuntimeError(secret)),
+            patch.object(person_routes, "_profile_person_page", side_effect=RuntimeError(secret)),
             patch.object(person_routes.logger, "error") as logged,
             self.assertRaises(HTTPException) as failure,
         ):
