@@ -434,6 +434,8 @@ class LLMRequest:
         """
         在单个模型上执行请求，包含针对临时错误的重试逻辑。
         如果成功，返回APIResponse。如果失败（重试耗尽或硬错误），则抛出ModelAttemptFailed异常。
+        默认处理器完整缓冲生成结果后才交付，按 provider.max_retry 重试；自定义流处理器
+        可能已交付增量，网络中断时停止当前请求，也不触发跨模型回退。
         """
         retry_remain = api_provider.max_retry
         compressed_messages: Optional[List[Message]] = None
@@ -498,6 +500,9 @@ class LLMRequest:
                 await asyncio.sleep(api_provider.retry_interval)
 
             except NetworkConnectionError as e:
+                # 收流过程中可能已向调用方交付部分内容，禁止无策略重复执行。
+                if stream_response_handler is not None and model_info.force_stream_mode:
+                    raise ReqAbortException("流式请求网络中断，已停止重试") from e
                 # 网络错误：单独记录并重试
                 # 尝试从链式异常中获取原始错误信息以诊断具体原因
                 original_error_info = self._get_original_error_info(e)
@@ -788,9 +793,8 @@ class LLMRequest:
 
     @staticmethod
     def _get_original_error_info(e: Exception) -> str:
-        """获取原始错误信息"""
+        """获取可安全记录的原始错误类型，不把上游响应正文写入日志。"""
         if e.__cause__:
             original_error_type = type(e.__cause__).__name__
-            original_error_msg = str(e.__cause__)
-            return f"\n  底层异常类型: {original_error_type}\n  底层异常信息: {original_error_msg}"
+            return f"\n  底层异常类型: {original_error_type}"
         return ""

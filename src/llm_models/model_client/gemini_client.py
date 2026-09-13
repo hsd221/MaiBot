@@ -661,7 +661,7 @@ class GeminiClient(BaseClient):
                 resp, usage_record = async_response_parser(req_task.result())
         except (ClientError, ServerError) as e:
             # 重封装 ClientError 和 ServerError 为 RespNotOkException
-            raise RespNotOkException(e.code, e.message) from None
+            raise RespNotOkException(e.code) from None
         except (
             UnknownFunctionCallArgumentError,
             UnsupportedFunctionError,
@@ -719,13 +719,22 @@ class GeminiClient(BaseClient):
         else:
             raise RespParseException(raw_response, "响应解析失败，缺失embeddings字段")
 
-        response.usage = UsageRecord(
-            model_name=model_info.name,
-            provider_name=model_info.api_provider,
-            prompt_tokens=len(embedding_input),
-            completion_tokens=0,
-            total_tokens=len(embedding_input),
-        )
+        # Gemini embedding 当前 SDK 不保证返回 token 统计；字符数不能冒充 token 数。
+        token_count = None
+        if getattr(raw_response, "embeddings", None):
+            statistics = getattr(raw_response.embeddings[0], "statistics", None)
+            token_count = getattr(statistics, "token_count", None)
+        if isinstance(token_count, (int, float)) and not isinstance(token_count, bool) and token_count >= 0:
+            if not float(token_count).is_integer():
+                return response
+            token_count = int(token_count)
+            response.usage = UsageRecord(
+                model_name=model_info.name,
+                provider_name=model_info.api_provider,
+                prompt_tokens=token_count,
+                completion_tokens=0,
+                total_tokens=token_count,
+            )
 
         return response
 
@@ -749,12 +758,19 @@ class GeminiClient(BaseClient):
 
         # 构造 prompt + 音频输入
         prompt = prompt_manager.format_prompt("media.audio.transcription")
+        from src.llm_models.request_trace import detect_audio_format
+
+        audio_data = base64.b64decode(audio_base64)
+        audio_format = detect_audio_format(audio_data)
+        if audio_format is None:
+            raise RespParseException(None, "无法识别音频格式")
+        mime_type = {"mp3": "audio/mpeg"}.get(audio_format, f"audio/{audio_format}")
         contents = [
             Content(
                 role="user",
                 parts=[
                     Part.from_text(text=prompt),
-                    Part.from_bytes(data=base64.b64decode(audio_base64), mime_type="audio/wav"),
+                    Part.from_bytes(data=audio_data, mime_type=mime_type),
                 ],
             )
         ]
