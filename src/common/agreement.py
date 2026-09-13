@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -128,7 +129,16 @@ def confirm_agreements(eula_hash: str, privacy_hash: str) -> dict[str, Agreement
 
     for document in status.values():
         confirm_path = PROJECT_ROOT / document.confirmation_file_name
-        confirm_path.write_text(document.hash, encoding="utf-8")
+        descriptor, temporary_path = tempfile.mkstemp(dir=PROJECT_ROOT, prefix=".agreement-", suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+                file.write(document.hash)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary_path, confirm_path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.unlink(temporary_path)
         logger.info(
             "协议确认文件已更新",
             event_code="agreement.confirmation_updated",

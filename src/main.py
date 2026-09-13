@@ -101,7 +101,7 @@ class MainSystem:
         logger.info("系统初始化开始", event_code="system.initialize.started", bot_name=global_config.bot.nickname)
 
         # 其他初始化任务
-        await asyncio.gather(self._init_components())
+        await self._init_components()
 
         logger.info(
             "系统初始化完成",
@@ -141,8 +141,8 @@ class MainSystem:
         logger.info("表情包管理器初始化完成", event_code="emoji.manager.initialized")
 
         # 初始化聊天管理器
-        await get_chat_manager()._initialize()
-        spawn_background_task(get_chat_manager()._auto_save_task(), name="chat-manager-auto-save")
+        await get_chat_manager().initialize()
+        spawn_background_task(get_chat_manager().auto_save(), name="chat-manager-auto-save")
 
         logger.info("聊天管理器初始化完成", event_code="chat.manager.initialized")
 
@@ -348,10 +348,8 @@ class MainSystem:
 async def main():
     """主函数"""
     system = MainSystem()
-    await asyncio.gather(
-        system.initialize(),
-        system.schedule_tasks(),
-    )
+    await system.initialize()
+    await system.schedule_tasks()
 
 
 if __name__ == "__main__":

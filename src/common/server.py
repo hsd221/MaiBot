@@ -158,9 +158,24 @@ class Server:
 global_server = None
 
 
+def get_server_address() -> tuple[str, int]:
+    """解析内部服务器地址，缺省值与 template.env 一致。"""
+    host = os.getenv("HOST", "127.0.0.1").strip()
+    if not host:
+        raise ValueError("HOST 不能为空，请检查 .env 或服务环境变量")
+    try:
+        port = int(os.getenv("PORT", "8000"))
+    except ValueError as exc:
+        raise ValueError("PORT 必须为 1 到 65535 的整数，请检查 .env 或服务环境变量") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("PORT 必须为 1 到 65535 的整数，请检查 .env 或服务环境变量")
+    return host, port
+
+
 def get_global_server() -> Server:
     """获取全局服务器实例"""
     global global_server
     if global_server is None:
-        global_server = Server(host=os.environ["HOST"], port=int(os.environ["PORT"]))
+        host, port = get_server_address()
+        global_server = Server(host=host, port=port)
     return global_server

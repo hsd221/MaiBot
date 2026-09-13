@@ -21,7 +21,7 @@ db = SqliteDatabase(
         "cache_size": -64 * 1000,  # 64MB缓存
         "foreign_keys": 1,
         "ignore_check_constraints": 0,
-        "synchronous": 0,  # 异步写入提高性能
+        "synchronous": 1,  # WAL + NORMAL 保持崩溃后的数据库一致性
         "busy_timeout": 1000,  # 1秒超时而不是3秒
     },
 )

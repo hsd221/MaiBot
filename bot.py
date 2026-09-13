@@ -11,37 +11,26 @@ from rich.traceback import install
 from src.common.logger import initialize_logging, get_logger, shutdown_logging
 from src.update_system.runner import UPDATE_EXIT_CODE, PendingUpdateStore, apply_pending_update
 
-# 设置工作目录为脚本所在目录
 script_dir = os.path.dirname(os.path.abspath(__file__))
-os.chdir(script_dir)
-
-env_path = Path(__file__).parent / ".env"
-template_env_path = Path(__file__).parent / "template" / "template.env"
-
-if env_path.exists():
-    load_dotenv(str(env_path), override=True)
-else:
-    try:
-        if template_env_path.exists():
-            shutil.copyfile(template_env_path, env_path)
-            print("未找到.env，已从 template/template.env 自动创建")
-            load_dotenv(str(env_path), override=True)
-        else:
-            print("未找到.env文件，也未找到模板 template/template.env")
-            raise FileNotFoundError(".env 文件不存在，请创建并配置所需的环境变量")
-    except Exception as e:
-        print(f"自动创建 .env 失败: {e}")
-        raise
-
-# 检查是否是 Worker 进程，只在 Worker 进程中输出详细的初始化信息
-# Runner 进程只需要基本的日志功能，不需要详细的初始化日志
-is_worker = os.environ.get("MAIBOT_WORKER_PROCESS") == "1"
-initialize_logging(verbose=is_worker)
-install(extra_lines=3)
 logger = get_logger("main")
-
-# 定义重启退出码
+confirm_logger = get_logger("confirm")
 RESTART_EXIT_CODE = 42
+
+
+def initialize_runtime():
+    """仅在进程入口加载环境；服务注入的变量优先于 .env。"""
+    os.chdir(script_dir)
+    env_path = Path(__file__).parent / ".env"
+    template_env_path = Path(__file__).parent / "template" / "template.env"
+    if not env_path.exists():
+        if not template_env_path.exists():
+            raise FileNotFoundError(".env 文件不存在，请创建并配置所需的环境变量")
+        shutil.copyfile(template_env_path, env_path)
+        print("未找到.env，已从 template/template.env 自动创建", flush=True)
+    load_dotenv(str(env_path), override=False)
+    initialize_logging(verbose=os.environ.get("MAIBOT_WORKER_PROCESS") == "1")
+    install(extra_lines=3)
+    logger.info("工作目录已设置", event_code="app.workdir.set", workdir=script_dir)
 
 
 def run_runner_process():
@@ -49,13 +38,14 @@ def run_runner_process():
     Runner 进程逻辑：作为守护进程运行，负责启动和监控 Worker 进程。
     处理重启请求 (退出码 42) 和 Ctrl+C 信号。
     """
-    script_file = sys.argv[0]
+    script_file = os.path.join(script_dir, "bot.py")
     python_executable = sys.executable
 
     # 设置环境变量，标记子进程为 Worker 进程
     env = os.environ.copy()
     env["MAIBOT_WORKER_PROCESS"] = "1"
 
+    crash_delay = 1
     while True:
         # 启动子进程 (Worker)
         # 使用 sys.executable 确保使用相同的 Python 解释器
@@ -68,6 +58,7 @@ def run_runner_process():
             argv_count=len(sys.argv),
         )
 
+        started_at = time.monotonic()
         process = subprocess.Popen(cmd, env=env)
 
         try:
@@ -110,6 +101,18 @@ def run_runner_process():
                     )
                 time.sleep(1)
                 continue
+            elif return_code not in {0, -2, -15, 130, 143}:
+                if time.monotonic() - started_at >= 60:
+                    crash_delay = 1
+                logger.error(
+                    "Worker 异常退出，将重新启动",
+                    event_code="runner.worker.crashed",
+                    exit_code=return_code,
+                    retry_delay_seconds=crash_delay,
+                )
+                time.sleep(crash_delay)
+                crash_delay = min(crash_delay * 2, 60)
+                continue
             else:
                 logger.info("Worker 进程退出", event_code="runner.worker.exited", exit_code=return_code)
                 sys.exit(return_code)
@@ -126,48 +129,6 @@ def run_runner_process():
                     logger.warning("Worker 进程停止超时，执行强制终止", event_code="runner.worker.kill_timeout")
                     process.kill()
             sys.exit(0)
-
-
-# 检查是否是 Worker 进程
-# 如果没有设置 MAIBOT_WORKER_PROCESS 环境变量，说明是直接运行的脚本，
-# 此时应该作为 Runner 运行。
-if os.environ.get("MAIBOT_WORKER_PROCESS") != "1":
-    if __name__ == "__main__":
-        run_runner_process()
-    # 如果作为模块导入，不执行 Runner 逻辑，但也不应该执行下面的 Worker 逻辑
-    sys.exit(0)
-
-# 以下是 Worker 进程的逻辑
-
-# 最早期初始化日志系统，确保所有后续模块都使用正确的日志格式
-# 注意：Runner 进程已经在第 37 行初始化了日志系统，但 Worker 进程是独立进程，需要重新初始化
-# 由于 Runner 和 Worker 是不同进程，它们有独立的内存空间，所以都会初始化一次
-# 这是正常的，但为了避免重复的初始化日志，我们在 initialize_logging() 中添加了防重复机制
-# 不过由于是不同进程，每个进程仍会初始化一次，这是预期的行为
-
-from src.main import MainSystem  # noqa
-from src.manager.async_task_manager import async_task_manager  # noqa
-
-
-# logger = get_logger("main")
-
-
-# install(extra_lines=3)
-
-# 设置工作目录为脚本所在目录
-# script_dir = os.path.dirname(os.path.abspath(__file__))
-# os.chdir(script_dir)
-logger.info("工作目录已设置", event_code="app.workdir.set", workdir=script_dir)
-
-
-confirm_logger = get_logger("confirm")
-# 获取没有加载env时的环境变量
-env_mask = {key: os.getenv(key) for key in os.environ}
-
-uvicorn_server = None
-driver = None
-app = None
-loop = None
 
 
 def print_opensource_notice():
@@ -218,19 +179,25 @@ async def graceful_shutdown():  # sourcery skip: use-named-expression
             from src.webui.webui_server import get_webui_server
 
             webui_server = get_webui_server()
-            if webui_server and webui_server._server:
+            if webui_server:
                 await webui_server.shutdown()
         except Exception as e:
             logger.warning("WebUI 服务器关闭失败，继续关闭流程", event_code="app.shutdown.webui_failed", error=str(e))
 
-        from src.plugin_system.core.events_manager import events_manager
-        from src.plugin_system.base.component_types import EventType
+        try:
+            from src.plugin_system.core.events_manager import events_manager
+            from src.plugin_system.base.component_types import EventType
 
-        # 触发 ON_STOP 事件
-        await events_manager.handle_mai_events(event_type=EventType.ON_STOP)
+            await events_manager.handle_mai_events(event_type=EventType.ON_STOP)
+        except Exception:
+            logger.exception("插件关闭事件失败，继续清理任务", event_code="app.shutdown.plugins_failed")
 
-        # 停止所有异步任务
-        await async_task_manager.stop_and_wait_all_tasks()
+        try:
+            from src.manager.async_task_manager import async_task_manager
+
+            await async_task_manager.stop_and_wait_all_tasks()
+        except Exception:
+            logger.exception("异步任务管理器关闭失败，继续清理任务", event_code="app.shutdown.manager_failed")
 
         # 获取所有剩余任务，排除当前任务
         remaining_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
@@ -293,79 +260,54 @@ def raw_main():
 
     easter_egg()
 
-    # 返回MainSystem实例
+    from src.main import MainSystem
+
     return MainSystem()
 
 
-if __name__ == "__main__":
-    exit_code = 0  # 用于记录程序最终的退出状态
+def run_worker_process() -> int:
+    """运行 Worker，并在正常退出、异常和受控重启时清理已启动的组件。"""
+    exit_code = 0
+    loop = None
     try:
-        # 获取MainSystem实例
-        main_system = raw_main()
-
-        # 创建事件循环
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-
-        # 初始化 WebSocket 日志推送
+        main_system = raw_main()
         from src.common.logger import initialize_ws_handler
 
         initialize_ws_handler(loop)
-
-        try:
-            # 执行初始化和任务调度
-            loop.run_until_complete(main_system.initialize())
-            # Schedule tasks returns a future that runs forever.
-            # We can run console_input_loop concurrently.
-            main_tasks = loop.create_task(main_system.schedule_tasks())
-            loop.run_until_complete(main_tasks)
-
-        except KeyboardInterrupt:
-            logger.warning("收到中断信号，开始关闭流程", event_code="app.interrupt_received")
-
-            # 取消主任务
-            if "main_tasks" in locals() and main_tasks and not main_tasks.done():
-                main_tasks.cancel()
-                try:
-                    loop.run_until_complete(main_tasks)
-                except asyncio.CancelledError:
-                    pass
-
-            # 执行优雅关闭
-            if loop and not loop.is_closed():
-                try:
-                    loop.run_until_complete(graceful_shutdown())
-                except Exception:
-                    logger.exception("中断处理期间关闭失败", event_code="app.interrupt_shutdown_failed")
-        # 新增：检测外部请求关闭
-
-    except SystemExit as e:
-        # 捕获 SystemExit (例如 sys.exit()) 并保留退出代码
-        if isinstance(e.code, int):
-            exit_code = e.code
-        else:
-            exit_code = 1 if e.code else 0
+        loop.run_until_complete(main_system.initialize())
+        loop.run_until_complete(main_system.schedule_tasks())
+    except KeyboardInterrupt:
+        logger.warning("收到中断信号，开始关闭流程", event_code="app.interrupt_received")
+    except SystemExit as exc:
+        exit_code = exc.code if isinstance(exc.code, int) else (1 if exc.code else 0)
         if exit_code in {RESTART_EXIT_CODE, UPDATE_EXIT_CODE}:
-            event_code = "app.update_exit_requested" if exit_code == UPDATE_EXIT_CODE else "app.restart_exit_requested"
-            logger.info("收到受控退出码", event_code=event_code, exit_code=exit_code)
-
+            logger.info("收到受控退出码", event_code="app.controlled_exit_requested", exit_code=exit_code)
     except Exception:
         logger.exception("主程序异常退出", event_code="app.main_failed")
-        exit_code = 1  # 标记发生错误
+        exit_code = 1
     finally:
-        # 确保 loop 在任何情况下都尝试关闭（如果存在且未关闭）
-        if "loop" in locals() and loop and not loop.is_closed():
-            loop.close()
-            print("[主程序] 事件循环已关闭")
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.run_until_complete(graceful_shutdown())
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except (Exception, KeyboardInterrupt):
+                logger.exception("关闭流程失败", event_code="app.shutdown.failed")
+            finally:
+                loop.close()
+                asyncio.set_event_loop(None)
+    return exit_code
 
-        # 关闭日志系统，释放文件句柄
-        try:
-            shutdown_logging()
-        except Exception as e:
-            print(f"关闭日志系统时出错: {e}")
 
-        print("[主程序] 准备退出...")
-
-        # 使用 os._exit() 强制退出，避免被阻塞
-        # 由于已经在 graceful_shutdown() 中完成了所有清理工作，这是安全的
+if __name__ == "__main__":
+    initialize_runtime()
+    if os.environ.get("MAIBOT_WORKER_PROCESS") != "1":
+        run_runner_process()
+    else:
+        exit_code = run_worker_process()
+        shutdown_logging()
+        # Worker 可能仍有第三方库线程；清理完成后保留硬退出以避免挂起。
+        print("[主程序] 准备退出...", flush=True)
+        sys.stderr.flush()
         os._exit(exit_code)
