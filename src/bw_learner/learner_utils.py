@@ -340,10 +340,6 @@ def is_bot_message(msg: Any) -> bool:
     if qq_account:
         bot_accounts["qq"] = qq_account
 
-    telegram_account = str(getattr(bot_config, "telegram_account", "") or "").strip()
-    if telegram_account:
-        bot_accounts["telegram"] = telegram_account
-
     for plat, account in platform_accounts.items():
         if account and plat not in bot_accounts:
             bot_accounts[plat] = account

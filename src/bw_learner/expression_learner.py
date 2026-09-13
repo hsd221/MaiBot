@@ -51,7 +51,7 @@ class ExpressionLearner:
     async def learn_and_store(
         self,
         messages: List[Any],
-    ) -> List[Tuple[str, str, str]]:
+    ) -> List[Tuple[str, str]]:
         """
         学习并存储表达方式
 
@@ -60,8 +60,11 @@ class ExpressionLearner:
             num: 学习数量
             timestamp_start: 学习开始的时间戳，如果为None则使用self.last_learning_time
         """
-        if not messages:
-            return None
+        _, enable_expression_learning, enable_jargon_learning = global_config.expression.get_expression_config_for_chat(
+            self.chat_id
+        )
+        if not messages or not (enable_expression_learning or enable_jargon_learning):
+            return []
 
         random_msg = messages
 
@@ -89,7 +92,11 @@ class ExpressionLearner:
         expressions, jargon_entries = parse_expression_response(response)
 
         # 从缓存中检查 jargon 是否出现在 messages 中
-        cached_jargon_entries = self._check_cached_jargons_in_messages(random_msg)
+        if not enable_expression_learning:
+            expressions = []
+        if not enable_jargon_learning:
+            jargon_entries = []
+        cached_jargon_entries = self._check_cached_jargons_in_messages(random_msg) if enable_jargon_learning else []
         if cached_jargon_entries:
             # 合并缓存中的 jargon 条目（去重：如果 content 已存在则跳过）
             existing_contents = {content for content, _ in jargon_entries}
@@ -99,9 +106,9 @@ class ExpressionLearner:
                     existing_contents.add(content)
                     logger.info(f"从缓存中检查到黑话: {content}")
 
-        # 检查表达方式数量，如果超过10个则放弃本次表达学习
+        # 检查表达方式数量，如果超过20个则放弃本次表达学习
         if len(expressions) > 20:
-            logger.info(f"表达方式提取数量超过10个（实际{len(expressions)}个），放弃本次表达学习")
+            logger.info(f"表达方式提取数量超过20个（实际{len(expressions)}个），放弃本次表达学习")
             expressions = []
 
         # 检查黑话数量，如果超过30个则放弃本次黑话学习
@@ -118,10 +125,8 @@ class ExpressionLearner:
             logger.info("解析后没有可用的表达方式")
             return []
 
-        logger.info(f"学习的prompt: {prompt}")
-        logger.info(f"学习的expressions: {expressions}")
-        logger.info(f"学习的jargon_entries: {jargon_entries}")
-        logger.info(f"学习的response: {response}")
+        logger.debug("表达学习模型交互", prompt=prompt, response=response)
+        logger.info("表达学习候选已解析", expression_count=len(expressions), jargon_count=len(jargon_entries))
 
         # 过滤表达方式，根据 source_id 溯源并应用各种过滤规则
         learnt_expressions = self._filter_expressions(expressions, random_msg)
@@ -130,11 +135,7 @@ class ExpressionLearner:
             logger.info("没有学习到表达风格")
             return []
 
-        # 展示学到的表达方式
-        learnt_expressions_str = ""
-        for situation, style in learnt_expressions:
-            learnt_expressions_str += f"{situation}->{style}\n"
-        logger.info(f"在 {self.chat_name} 学习到表达风格:\n{learnt_expressions_str}")
+        logger.info("表达风格学习完成", expression_count=len(learnt_expressions))
 
         current_time = time.time()
 
@@ -152,7 +153,7 @@ class ExpressionLearner:
         self,
         expressions: List[Tuple[str, str, str]],
         messages: List[Any],
-    ) -> List[Tuple[str, str, str]]:
+    ) -> List[Tuple[str, str]]:
         """
         过滤表达方式，移除不符合条件的条目
 
@@ -161,9 +162,9 @@ class ExpressionLearner:
             messages: 原始消息列表，用于溯源和验证
 
         Returns:
-            过滤后的表达方式列表，每个元素是 (situation, style, context)
+            过滤后的表达方式列表，每个元素是 (situation, style)
         """
-        filtered_expressions: List[Tuple[str, str, str]] = []  # (situation, style, context)
+        filtered_expressions: List[Tuple[str, str]] = []
 
         # 准备机器人名称集合（用于过滤 style 与机器人名称重复的表达）
         banned_names = set()

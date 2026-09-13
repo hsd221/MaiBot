@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from src.bw_learner import expression_learner, expression_selector
 from src.bw_learner.expression_learner import ExpressionLearner
 from src.bw_learner.expression_selector import ExpressionSelector
+from src.config.official_configs import ExpressionConfig
 
 
 class ExpressionSelectorCandidateTest(unittest.IsolatedAsyncioTestCase):
@@ -198,7 +199,10 @@ class ExpressionLearnerFilteringTest(unittest.IsolatedAsyncioTestCase):
         )
         messages = [SimpleNamespace(processed_plain_text="这也太离谱了", marker="human")]
         miner = SimpleNamespace(get_cached_jargons=Mock(return_value=[]))
-        fake_config = SimpleNamespace(bot=SimpleNamespace(nickname="Mai", alias_names=[]))
+        fake_config = SimpleNamespace(
+            bot=SimpleNamespace(nickname="Mai", alias_names=[]),
+            expression=ExpressionConfig(learning_list=[["", "enable", "enable", "enable"]]),
+        )
 
         with (
             patch.object(expression_learner, "global_config", fake_config),

@@ -125,7 +125,7 @@ class MessageRecorder:
                 )
 
                 # 触发 expression_learner 和 jargon_miner 的处理
-                if self.enable_expression_learning:
+                if self.enable_expression_learning or self.enable_jargon_learning:
                     spawn_background_task(self._trigger_expression_learning(messages), name="expression-learning")
                 if self.enable_behavior_learning:
                     spawn_background_task(self._trigger_behavior_learning(messages), name="behavior-learning")
