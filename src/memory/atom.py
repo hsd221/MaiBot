@@ -388,7 +388,7 @@ def reinforce_memory(atom: MemoryAtom, level: str = "normal") -> MemoryAtom:
         return replace(new_atom, weight=new_weight)
 
     else:
-        logger.warning("无效的强化级别: %s, 仅支持 low/medium/high", level)
+        logger.warning("无效的强化级别: %s, 仅支持 none/normal/strong", level)
         raise ValueError(f"Unknown reinforcement level: {level}")
 
 

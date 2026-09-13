@@ -34,7 +34,7 @@ _SQLITE_PRAGMAS = {
     "cache_size": -64 * 1000,
     "foreign_keys": 1,
     "ignore_check_constraints": 0,
-    "synchronous": 0,
+    "synchronous": 1,  # WAL + NORMAL 保持崩溃后的数据库一致性
     "busy_timeout": 1000,
 }
 
