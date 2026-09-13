@@ -35,7 +35,16 @@ class AsyncTask:
             await asyncio.sleep(self.wait_before_start)
 
         while not abort_flag.is_set():
-            await self.run()
+            try:
+                await self.run()
+            except Exception:
+                if self.run_interval <= 0:
+                    raise
+                logger.exception(
+                    "周期任务本轮失败，将在下个周期重试",
+                    event_code="async_task.iteration_failed",
+                    task_name=self.task_name,
+                )
             if self.run_interval > 0:
                 await asyncio.sleep(self.run_interval)
             else:

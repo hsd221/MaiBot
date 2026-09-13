@@ -141,11 +141,13 @@ class ChatManagerLookupTest(unittest.TestCase):
         manager.last_messages[group_stream.stream_id] = last_message
 
         self.assertIsNone(manager.get_stream("missing"))
-        self.assertIs(manager.get_stream(group_stream.stream_id), group_stream)
-        self.assertIs(group_stream.context.get_last_message(), last_message)
-        self.assertIs(
-            manager.get_stream_by_info("qq", group_stream.user_info, group_stream.group_info),
-            group_stream,
+        snapshot = manager.get_stream(group_stream.stream_id)
+        self.assertIsNot(snapshot, group_stream)
+        self.assertIs(snapshot.context.get_last_message(), last_message)
+        self.assertIsNone(group_stream.context)
+        self.assertEqual(
+            manager.get_stream_by_info("qq", group_stream.user_info, group_stream.group_info).to_dict(),
+            group_stream.to_dict(),
         )
         self.assertEqual(manager.get_stream_name(group_stream.stream_id), "Named Group")
         self.assertEqual(manager.get_stream_name(private_stream.stream_id), "Bob的私聊")
@@ -360,8 +362,8 @@ class ChatManagerGetOrCreateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored_stream.group_info.group_name, "Fresh Group")
         self.assertIs(restored_stream.context.get_last_message(), last_message)
         self.assertEqual(restored_stream.last_active_time, 30.0)
-        self.assertIs(manager.streams[stream_id], restored_stream)
-        manager._save_stream.assert_awaited_once_with(restored_stream)
+        self.assertIsNot(manager.streams[stream_id], restored_stream)
+        manager._save_stream.assert_awaited_once_with(manager.streams[stream_id])
 
         manager = make_manager()
         manager._save_stream = AsyncMock()
@@ -373,8 +375,8 @@ class ChatManagerGetOrCreateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(new_stream.stream_id, ChatManager._generate_stream_id("qq", user_info, None))
         self.assertIsNone(new_stream.group_info)
-        self.assertIs(manager.streams[new_stream.stream_id], new_stream)
-        manager._save_stream.assert_awaited_once_with(new_stream)
+        self.assertIsNot(manager.streams[new_stream.stream_id], new_stream)
+        manager._save_stream.assert_awaited_once_with(manager.streams[new_stream.stream_id])
 
     async def test_get_or_create_stream_reraises_database_lookup_errors(self) -> None:
         manager = make_manager()

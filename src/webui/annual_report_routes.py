@@ -470,16 +470,15 @@ async def get_brain_power(year: int = 2025) -> BrainPowerData:
         ).where((Messages.time >= start_ts) & (Messages.time <= end_ts) & (Messages.interest_value.is_null(False)))
         interest_result = interest_query.dicts().get()
         data.avg_interest_value = round(float(interest_result.get("avg_interest") or 0), 2)
-        data.max_interest_value = round(float(interest_result.get("max_interest") or 0), 2)
+        max_interest = interest_result.get("max_interest")
+        data.max_interest_value = round(float(max_interest or 0), 2)
 
         # 找到最高兴趣值的时间
-        if data.max_interest_value > 0:
+        if max_interest is not None:
             max_interest_msg = (
                 Messages.select(Messages.time)
                 .where(
-                    (Messages.time >= start_ts)
-                    & (Messages.time <= end_ts)
-                    & (Messages.interest_value == data.max_interest_value)
+                    (Messages.time >= start_ts) & (Messages.time <= end_ts) & (Messages.interest_value == max_interest)
                 )
                 .first()
             )
@@ -654,18 +653,22 @@ async def get_expression_vibe(year: int = 2025) -> ExpressionVibeData:
             return content
 
         # 使用 user_id 判断是否是 bot 发送的消息
-        late_night_messages = list(
+        late_night_messages = (
             Messages.select(
                 Messages.time,
                 Messages.processed_plain_text,
                 Messages.display_message,
             )
             .where(
-                (Messages.time >= start_ts) & (Messages.time <= end_ts) & (Messages.user_id == bot_qq)  # bot 发送的消息
+                (Messages.time >= start_ts)
+                & (Messages.time <= end_ts)
+                & (Messages.user_id == bot_qq)
+                & (fn.strftime("%H", Messages.time, "unixepoch", "localtime") < "06")
             )
             .order_by(Messages.time.desc())
+            .iterator()
         )
-        # 筛选出0-6点的消息
+        # 只流式读取本地时间 0-6 点的消息，找到十条有效内容即停止。
         late_night_filtered = []
         for msg in late_night_messages:
             msg_dt = datetime.fromtimestamp(msg.time)

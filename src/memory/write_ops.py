@@ -436,6 +436,11 @@ class WriteOpLogger:
                 to_remove -= 1
                 trimmed += 1
 
+            # Pending/failed operations must remain recoverable. If none can be
+            # removed, rewriting and fsyncing the identical WAL adds no safety.
+            if trimmed == 0:
+                return 0
+
             remaining = retainable + cleanable
             # 按 created_at 稳定排序，保持原有顺序
             remaining.sort(key=lambda op: op.created_at)

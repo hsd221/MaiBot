@@ -205,29 +205,30 @@ def _process_delta(
             fc_delta_buffer.write(delta.content)
     # 接收tool_calls
     if hasattr(delta, "tool_calls") and delta.tool_calls:
-        tool_call_delta = delta.tool_calls[0]
-
-        if tool_call_delta.index >= len(tool_calls_buffer):
-            # 调用索引号大于等于缓冲区长度，说明是新的工具调用
-            if tool_call_delta.id and tool_call_delta.function and tool_call_delta.function.name:
-                tool_calls_buffer.append(
-                    (
-                        tool_call_delta.id,
-                        tool_call_delta.function.name,
-                        io.StringIO(),
+        for tool_call_delta in delta.tool_calls:
+            if tool_call_delta.index < 0 or tool_call_delta.index > len(tool_calls_buffer):
+                raise RespParseException(None, f"工具调用增量索引不连续: {tool_call_delta.index}")
+            if tool_call_delta.index == len(tool_calls_buffer):
+                # 调用索引号大于等于缓冲区长度，说明是新的工具调用
+                if tool_call_delta.id and tool_call_delta.function and tool_call_delta.function.name:
+                    tool_calls_buffer.append(
+                        (
+                            tool_call_delta.id,
+                            tool_call_delta.function.name,
+                            io.StringIO(),
+                        )
                     )
-                )
-            else:
-                logger.warning(
-                    "工具调用增量缺少必要字段",
-                    event_code="llm.openai.tool_call_delta.invalid",
-                    index=tool_call_delta.index,
-                )
+                else:
+                    logger.warning(
+                        "工具调用增量缺少必要字段",
+                        event_code="llm.openai.tool_call_delta.invalid",
+                        index=tool_call_delta.index,
+                    )
+                    continue
 
-        if tool_call_delta.function and tool_call_delta.function.arguments:
-            # 如果有工具调用参数，则添加到对应的工具调用的参数串缓冲区中
-            tool_calls_buffer[tool_call_delta.index][2].write(tool_call_delta.function.arguments)
-
+            if tool_call_delta.function and tool_call_delta.function.arguments:
+                # 如果有工具调用参数，则添加到对应的工具调用的参数串缓冲区中
+                tool_calls_buffer[tool_call_delta.index][2].write(tool_call_delta.function.arguments)
     return in_rc_flag
 
 
@@ -624,7 +625,7 @@ class OpenaiClient(BaseClient):
             raise NetworkConnectionError() from e
         except APIStatusError as e:
             # 重封装APIError为RespNotOkException
-            raise RespNotOkException(e.status_code, e.message) from e
+            raise RespNotOkException(e.status_code) from None
 
         if usage_record:
             resp.usage = UsageRecord(

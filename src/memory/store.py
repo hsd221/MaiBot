@@ -4,10 +4,12 @@
 """
 
 import asyncio
+import contextvars
 import datetime
 import json
 import uuid
 from dataclasses import dataclass, field
+from functools import partial, wraps
 from typing import Any, Optional
 
 from src.common.logger import get_logger
@@ -150,6 +152,16 @@ class MemoryStoreConfig:
 # ---------------------------------------------------------------------------
 
 
+def _serialized_remote_qdrant(method):
+    """Keep remote operations atomic across newly asynchronous SDK calls."""
+
+    @wraps(method)
+    async def wrapped(self, *args, **kwargs):
+        return await self._run_remote_operation(method, *args, **kwargs)
+
+    return wrapped
+
+
 class QdrantManager:
     """Qdrant 向量索引管理器
 
@@ -172,9 +184,73 @@ class QdrantManager:
         self._embedding_operations_enabled = True
         self._embedding_signature = config.embedding_signature or f"dimension-{config.embedding_dimension}"
         self._embedding_reconfigure_lock = asyncio.Lock()
+        self._remote_operation_lock = asyncio.Lock()
+        self._remote_operation_owner: Optional[asyncio.Task] = None
+        self._remote_operation_cancel_requested = False
 
         if not self._available:
             logger.warning("qdrant-client 未安装，向量索引功能不可用。pip install qdrant-client")
+
+    async def _run_remote_operation(self, method, *args, **kwargs):
+        if not self.config.qdrant_url or self._remote_operation_owner is asyncio.current_task():
+            return await method(self, *args, **kwargs)
+
+        # Waiters remain cancellable before taking the lock. Once started,
+        # preserve the old inline-operation ordering through all remote calls
+        # and the subsequent SQLite/state updates, even if the caller cancels.
+        async with self._remote_operation_lock:
+
+            async def invoke():
+                self._remote_operation_owner = asyncio.current_task()
+                self._remote_operation_cancel_requested = False
+                try:
+                    return await method(self, *args, **kwargs)
+                finally:
+                    # A shutdown may cancel invoke itself, not just its caller.
+                    # Finish all post-I/O state changes before surfacing it.
+                    if self._remote_operation_cancel_requested:
+                        raise asyncio.CancelledError
+
+            operation = asyncio.create_task(invoke())
+            try:
+                return await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                while not operation.done():
+                    try:
+                        await asyncio.shield(operation)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not operation.cancelled():
+                    operation.exception()
+                raise
+            finally:
+                self._remote_operation_owner = None
+
+    async def _run_qdrant_io(self, method, *args, **kwargs):
+        """Only blocking server SDK calls move threads; local SQLite stays put.
+
+        Keep the executor Future rather than a to_thread Task: shutdown cancels
+        all Tasks, but the result is required before committing migration state.
+        https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.loop.run_in_executor
+        """
+        if self.config.qdrant_url:
+            loop = asyncio.get_running_loop()
+            context = contextvars.copy_context()
+            call = partial(context.run, method, *args, **kwargs)
+            # Keep the concurrent future alive when graceful shutdown cancels
+            # every asyncio Task; shield prevents cancellation from reaching
+            # the in-flight network request.
+            future = loop.run_in_executor(None, call)
+            while True:
+                try:
+                    return await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    self._remote_operation_cancel_requested = True
+                    if future.done():
+                        return future.result()
+        return method(*args, **kwargs)
 
     @property
     def atom_migration_pending(self) -> bool:
@@ -489,9 +565,9 @@ class QdrantManager:
         if not self._available or not self._client:
             return
 
-        exists = collection_name in self._get_collection_names()
+        exists = collection_name in (await self._run_qdrant_io(self._get_collection_names))
         if exists:
-            collection_info = self._client.get_collection(collection_name=collection_name)
+            collection_info = await self._run_qdrant_io(self._client.get_collection, collection_name=collection_name)
             vector_size = self._collection_vector_size(collection_info)
             if vector_size is None:
                 raise RuntimeError(
@@ -503,7 +579,8 @@ class QdrantManager:
                 )
             return
 
-        self._client.create_collection(
+        await self._run_qdrant_io(
+            self._client.create_collection,
             collection_name=collection_name,
             vectors_config=qdrant_models.VectorParams(
                 size=int(dimension),
@@ -511,7 +588,8 @@ class QdrantManager:
             ),
         )
         for field_schema in payload_schema:
-            self._client.create_payload_index(
+            await self._run_qdrant_io(
+                self._client.create_payload_index,
                 collection_name=collection_name,
                 field_name=field_schema["name"],
                 field_type=field_schema["type"],
@@ -534,8 +612,8 @@ class QdrantManager:
         if self._client is None:
             return index_name, None, False
 
-        collection_names = self._get_collection_names()
-        aliases = self._get_aliases()
+        collection_names = await self._run_qdrant_io(self._get_collection_names)
+        aliases = await self._run_qdrant_io(self._get_aliases)
         state = self._load_vector_state(index_name)
         active_collection = aliases.get(alias_name)
         if active_collection and active_collection not in collection_names:
@@ -558,9 +636,9 @@ class QdrantManager:
                     payload_schema,
                     self.config.embedding_dimension,
                 )
-            self._switch_alias(alias_name, active_collection)
+            await self._run_qdrant_io(self._switch_alias, alias_name, active_collection)
 
-        active_info = self._client.get_collection(collection_name=active_collection)
+        active_info = await self._run_qdrant_io(self._client.get_collection, collection_name=active_collection)
         active_dimension = self._collection_vector_size(active_info)
         if active_dimension is None:
             raise RuntimeError(f"Qdrant collection '{active_collection}' 缺少未命名向量配置")
@@ -700,6 +778,7 @@ class QdrantManager:
         self._graph_migration_target = target
         self._graph_search_enabled = search_enabled
 
+    @_serialized_remote_qdrant
     async def initialize(self) -> None:
         """初始化 Qdrant 连接并确保集合存在
 
@@ -712,14 +791,16 @@ class QdrantManager:
 
         try:
             if self.config.qdrant_url:
-                self._client = _QdrantClient(
+                self._client = await self._run_qdrant_io(
+                    _QdrantClient,
                     url=self.config.qdrant_url,
                     api_key=self.config.qdrant_api_key,
                 )
                 mode = "server"
                 source = self.config.qdrant_url
             else:
-                self._client = _QdrantClient(
+                self._client = await self._run_qdrant_io(
+                    _QdrantClient,
                     path=self.config.qdrant_local_path,
                 )
                 mode = "local"
@@ -748,6 +829,7 @@ class QdrantManager:
             logger.exception("Qdrant 初始化失败", event_code="memory.qdrant.init_failed")
             self._client = None
 
+    @_serialized_remote_qdrant
     async def reconfigure_embedding(self, profile: Any) -> bool:
         """Prepare versioned indexes for a validated runtime embedding profile.
 
@@ -831,6 +913,7 @@ class QdrantManager:
             finally:
                 self._embedding_operations_enabled = True
 
+    @_serialized_remote_qdrant
     async def close(self) -> None:
         """关闭 Qdrant 连接"""
         self._client = None
@@ -877,13 +960,13 @@ class QdrantManager:
             return
 
         try:
-            collections = self._client.get_collections().collections
+            collections = (await self._run_qdrant_io(self._client.get_collections)).collections
             exists = any(c.name == collection_name for c in collections)
         except Exception:
             exists = False
 
         if exists:
-            collection_info = self._client.get_collection(collection_name=collection_name)
+            collection_info = await self._run_qdrant_io(self._client.get_collection, collection_name=collection_name)
             vector_size = self._collection_vector_size(collection_info)
             if vector_size is None:
                 raise RuntimeError(
@@ -898,7 +981,8 @@ class QdrantManager:
 
         if not exists:
             try:
-                self._client.create_collection(
+                await self._run_qdrant_io(
+                    self._client.create_collection,
                     collection_name=collection_name,
                     vectors_config=qdrant_models.VectorParams(
                         size=self.config.embedding_dimension,
@@ -907,7 +991,8 @@ class QdrantManager:
                 )
                 # 创建 payload 索引
                 for field_schema in payload_schema:
-                    self._client.create_payload_index(
+                    await self._run_qdrant_io(
+                        self._client.create_payload_index,
                         collection_name=collection_name,
                         field_name=field_schema["name"],
                         field_type=field_schema["type"],
@@ -924,6 +1009,7 @@ class QdrantManager:
 
     # -- 向量写入 -----------------------------------------------------------
 
+    @_serialized_remote_qdrant
     async def upsert_atom_vector(
         self,
         point_id: str,
@@ -938,6 +1024,7 @@ class QdrantManager:
             payload=payload,
         )
 
+    @_serialized_remote_qdrant
     async def upsert_atom_vector_to_collection(
         self,
         collection_name: str,
@@ -963,7 +1050,8 @@ class QdrantManager:
             )
             return False
         try:
-            self._client.upsert(
+            await self._run_qdrant_io(
+                self._client.upsert,
                 collection_name=collection_name,
                 points=[
                     qdrant_models.PointStruct(
@@ -984,6 +1072,7 @@ class QdrantManager:
             )
             return False
 
+    @_serialized_remote_qdrant
     async def upsert_graph_vector(
         self,
         point_id: str,
@@ -998,6 +1087,7 @@ class QdrantManager:
             payload=payload,
         )
 
+    @_serialized_remote_qdrant
     async def upsert_graph_vector_to_collection(
         self,
         collection_name: str,
@@ -1023,7 +1113,8 @@ class QdrantManager:
             )
             return False
         try:
-            self._client.upsert(
+            await self._run_qdrant_io(
+                self._client.upsert,
                 collection_name=collection_name,
                 points=[
                     qdrant_models.PointStruct(
@@ -1044,6 +1135,7 @@ class QdrantManager:
             )
             return False
 
+    @_serialized_remote_qdrant
     async def batch_upsert_atom_vectors(
         self,
         points: list[tuple[str, list[float], dict[str, Any]]],
@@ -1077,7 +1169,8 @@ class QdrantManager:
             ]
             if not point_structs:
                 return 0
-            self._client.upsert(
+            await self._run_qdrant_io(
+                self._client.upsert,
                 collection_name=self._atom_write_collection(),
                 points=point_structs,
             )
@@ -1093,6 +1186,7 @@ class QdrantManager:
 
     # -- 向量检索 -----------------------------------------------------------
 
+    @_serialized_remote_qdrant
     async def search_similar_atoms(
         self,
         query_vector: list[float],
@@ -1117,7 +1211,8 @@ class QdrantManager:
 
         try:
             qdrant_filter = self._build_filter(filters, self._atoms_payload_schema())
-            results = self._query_points(
+            results = await self._run_qdrant_io(
+                self._query_points,
                 collection_name=self.active_atoms_collection,
                 query_vector=query_vector,
                 qdrant_filter=qdrant_filter,
@@ -1140,6 +1235,7 @@ class QdrantManager:
             )
             return []
 
+    @_serialized_remote_qdrant
     async def search_similar_graph_entries(
         self,
         query_vector: list[float],
@@ -1153,7 +1249,8 @@ class QdrantManager:
             return []
 
         try:
-            results = self._query_points(
+            results = await self._run_qdrant_io(
+                self._query_points,
                 collection_name=self.active_graph_collection,
                 query_vector=query_vector,
                 limit=limit,
@@ -1192,7 +1289,8 @@ class QdrantManager:
         untrusted = 0
         try:
             while True:
-                points, next_offset = self._client.scroll(
+                points, next_offset = await self._run_qdrant_io(
+                    self._client.scroll,
                     collection_name=collection_name,
                     limit=page_size,
                     offset=offset,
@@ -1243,6 +1341,7 @@ class QdrantManager:
             )
             return None
 
+    @_serialized_remote_qdrant
     async def list_atom_points(
         self,
         page_size: int = 256,
@@ -1257,6 +1356,7 @@ class QdrantManager:
             page_size=page_size,
         )
 
+    @_serialized_remote_qdrant
     async def list_graph_points(
         self,
         page_size: int = 256,
@@ -1270,6 +1370,7 @@ class QdrantManager:
             page_size=page_size,
         )
 
+    @_serialized_remote_qdrant
     async def list_atom_ids(
         self,
         page_size: int = 256,
@@ -1287,6 +1388,7 @@ class QdrantManager:
 
     # -- 向量删除 -----------------------------------------------------------
 
+    @_serialized_remote_qdrant
     async def delete_atom_vector(self, point_id: str | int) -> bool:
         """删除指定记忆原子的向量"""
         if not self._available:
@@ -1298,6 +1400,7 @@ class QdrantManager:
                 return False
         return True
 
+    @_serialized_remote_qdrant
     async def delete_atom_vector_from_collection(
         self,
         collection_name: str,
@@ -1309,7 +1412,8 @@ class QdrantManager:
         if not self._client:
             return False
         try:
-            self._client.delete(
+            await self._run_qdrant_io(
+                self._client.delete,
                 collection_name=collection_name,
                 points_selector=qdrant_models.PointIdsList(points=[self._normalize_point_id(point_id)]),
             )
@@ -1323,6 +1427,7 @@ class QdrantManager:
             )
             return False
 
+    @_serialized_remote_qdrant
     async def set_atom_payload(self, point_id: str, payload: dict[str, Any]) -> bool:
         """更新 Qdrant 中记忆原子的 payload 字段（不改变向量）
 
@@ -1343,7 +1448,8 @@ class QdrantManager:
         updated = False
         for collection_name in self._atom_mutation_collections():
             try:
-                self._client.set_payload(
+                await self._run_qdrant_io(
+                    self._client.set_payload,
                     collection_name=collection_name,
                     payload=payload,
                     points=[self._normalize_point_id(point_id)],
@@ -1367,6 +1473,7 @@ class QdrantManager:
                 return False
         return updated
 
+    @_serialized_remote_qdrant
     async def delete_graph_vector(self, entry_id: str) -> bool:
         """删除指定图条目的向量"""
         if not self._available:
@@ -1378,6 +1485,7 @@ class QdrantManager:
                 return False
         return True
 
+    @_serialized_remote_qdrant
     async def delete_graph_vector_from_collection(self, collection_name: str, entry_id: str | int) -> bool:
         """Delete one graph point from an explicit physical collection or alias."""
         if not self._available:
@@ -1385,7 +1493,8 @@ class QdrantManager:
         if not self._client:
             return False
         try:
-            self._client.delete(
+            await self._run_qdrant_io(
+                self._client.delete,
                 collection_name=collection_name,
                 points_selector=qdrant_models.PointIdsList(points=[self._normalize_point_id(entry_id)]),
             )
@@ -1451,7 +1560,7 @@ class QdrantManager:
             return False
 
         try:
-            self._switch_alias(alias_name, target)
+            await self._run_qdrant_io(self._switch_alias, alias_name, target)
         except Exception:
             logger.exception(
                 "Qdrant 向量迁移 alias 切换失败",
@@ -1493,6 +1602,7 @@ class QdrantManager:
         )
         return True
 
+    @_serialized_remote_qdrant
     async def mark_atom_migration_progress(
         self,
         *,
@@ -1509,6 +1619,7 @@ class QdrantManager:
             total_count=total_count,
         )
 
+    @_serialized_remote_qdrant
     async def mark_atom_migration_failure(self, error: str) -> None:
         """Record an atom migration failure without changing the active alias."""
         self._mark_index_migration_failure(
@@ -1517,6 +1628,7 @@ class QdrantManager:
             error=error,
         )
 
+    @_serialized_remote_qdrant
     async def activate_atom_migration(self) -> bool:
         """Atomically point the stable atom alias at a fully rebuilt collection."""
         target = self._atom_migration_target
@@ -1531,6 +1643,7 @@ class QdrantManager:
         self._vector_search_enabled = True
         return True
 
+    @_serialized_remote_qdrant
     async def mark_graph_migration_progress(
         self,
         *,
@@ -1547,6 +1660,7 @@ class QdrantManager:
             total_count=total_count,
         )
 
+    @_serialized_remote_qdrant
     async def mark_graph_migration_failure(self, error: str) -> None:
         """Record a graph migration failure without changing the active alias."""
         self._mark_index_migration_failure(
@@ -1555,6 +1669,7 @@ class QdrantManager:
             error=error,
         )
 
+    @_serialized_remote_qdrant
     async def activate_graph_migration(self) -> bool:
         """Atomically point the stable graph alias at a fully rebuilt collection."""
         target = self._graph_migration_target
@@ -1571,12 +1686,13 @@ class QdrantManager:
 
     # -- 集合管理工具 -------------------------------------------------------
 
+    @_serialized_remote_qdrant
     async def collection_info(self, collection_name: str) -> Optional[dict[str, Any]]:
         """获取集合信息"""
         if not self._available or not self._client:
             return None
         try:
-            info = self._client.get_collection(collection_name)
+            info = await self._run_qdrant_io(self._client.get_collection, collection_name)
             return {
                 "name": collection_name,
                 "vectors_count": info.points_count,
@@ -1590,12 +1706,13 @@ class QdrantManager:
             )
             return None
 
+    @_serialized_remote_qdrant
     async def delete_collection(self, collection_name: str) -> bool:
         """删除集合"""
         if not self._available or not self._client:
             return False
         try:
-            self._client.delete_collection(collection_name)
+            await self._run_qdrant_io(self._client.delete_collection, collection_name)
             logger.info("Qdrant 集合已删除", event_code="memory.qdrant.collection_deleted", collection=collection_name)
             return True
         except Exception:
@@ -1937,12 +2054,49 @@ class MemoryStore:
         """
         if not atom_ids:
             return {}
-        try:
+
+        def read_atoms():
             atoms = MemoryAtom.select().where(MemoryAtom.atom_id.in_(atom_ids))
             return {atom.atom_id: self._atom_to_dict(atom) for atom in atoms}
+
+        try:
+            return await self._run_sqlite_read(read_atoms)
         except Exception:
             logger.exception("记忆原子批量获取失败", event_code="memory.atom.batch_get_failed", count=len(atom_ids))
             return {}
+
+    @staticmethod
+    async def _run_sqlite_read(read):
+        """Offload bulk reads while preserving connection-local transaction visibility.
+
+        Writes and BM25 cache updates keep their existing ordered execution.
+        Cancellation drains the worker before connection reconfiguration/close can
+        proceed; reads never publish cache changes.
+        """
+        if memory_db.in_transaction() or memory_db.database == ":memory:":
+            return read()
+
+        def read_with_connection():
+            with memory_db.connection_context():
+                return read()
+
+        # An executor Future is not returned by all_tasks(): shutdown may cancel
+        # every Task, but must not erase our handle to an active SQLite reader.
+        context = contextvars.copy_context()
+        operation = asyncio.get_running_loop().run_in_executor(None, context.run, read_with_connection)
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            while not operation.done():
+                try:
+                    await asyncio.shield(operation)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not operation.cancelled():
+                operation.exception()
+            raise
 
     async def list_atom_ids(self, status: Optional[str] = None) -> Optional[set[str]]:
         """读取 SQLite 中的记忆原子 ID；查询失败时返回 ``None``。"""
@@ -2027,20 +2181,23 @@ class MemoryStore:
         Returns:
             list[dict]: 原子数据列表
         """
-        try:
+
+        def read_atoms():
             conditions = []
             if atom_type:
                 conditions.append(MemoryAtom.atom_type == atom_type)
             if status:
                 conditions.append(MemoryAtom.status == status)
 
-            with memory_db:
-                if conditions:
-                    query = MemoryAtom.select().where(*conditions)
-                else:
-                    query = MemoryAtom.select()
-                query = query.order_by(MemoryAtom.created_at.desc()).limit(limit).offset(offset)
-                return [self._atom_to_dict(a) for a in query]
+            if conditions:
+                query = MemoryAtom.select().where(*conditions)
+            else:
+                query = MemoryAtom.select()
+            query = query.order_by(MemoryAtom.created_at.desc()).limit(limit).offset(offset)
+            return [self._atom_to_dict(a) for a in query]
+
+        try:
+            return await self._run_sqlite_read(read_atoms)
         except Exception:
             logger.exception(
                 "记忆原子列表获取失败",

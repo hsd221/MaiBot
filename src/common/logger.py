@@ -456,7 +456,7 @@ def remove_duplicate_handlers():  # sourcery skip: for-append-to-extend, list-co
 # 读取日志配置
 def load_log_config():  # sourcery skip: use-contextlib-suppress
     """从配置文件加载日志设置"""
-    config_path = Path("config/bot_config.toml")
+    config_path = PROJECT_ROOT / "config" / "bot_config.toml"
     default_config = {
         "date_style": "m-d H:i:s",
         "log_level_style": "compact",

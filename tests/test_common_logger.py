@@ -559,7 +559,7 @@ class LoggerConfigurationTest(unittest.TestCase):
             self.assertEqual(app_logger.get_timestamp_format(), "%Y-%m-%d %H:%M:%S")
 
     def test_load_log_config_reads_existing_toml_or_falls_back_on_missing_and_parse_errors(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(app_logger, "PROJECT_ROOT", Path(tmpdir)):
             root = Path(tmpdir)
             config_dir = root / "config"
             config_dir.mkdir()

@@ -78,7 +78,7 @@ class MessageQueryWrapperTest(unittest.TestCase):
             chat_id="chat-1",
             timestamp_start=10.0,
             timestamp_end=20.0,
-            limit=0,
+            limit=message_api.DEFAULT_MESSAGE_LIMIT,
             limit_mode="latest",
             filter_bot=False,
             filter_command=False,

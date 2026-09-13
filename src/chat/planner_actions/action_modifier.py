@@ -82,6 +82,7 @@ class ActionModifier:
                     logger.debug(f"{self.log_prefix}阶段一移除动作: {disabled_action_name}，原因: 用户自行禁用")
 
         # === 第二阶段：检查动作的关联类型 ===
+        self.chat_stream = get_chat_manager().get_stream(self.chat_id) or self.chat_stream
         chat_context = self.chat_stream.context
         type_mismatched_actions = self._check_action_associated_types(all_actions, chat_context)
 
@@ -121,10 +122,14 @@ class ActionModifier:
         available_actions_text = "、".join(available_actions) if available_actions else "无"
         logger.debug(f"{self.log_prefix} 当前可用动作: {available_actions_text}||移除: {removals_summary}")
 
-    def _check_action_associated_types(self, all_actions: Dict[str, ActionInfo], chat_context: ChatMessageContext):
+    def _check_action_associated_types(
+        self, all_actions: Dict[str, ActionInfo], chat_context: ChatMessageContext | None
+    ):
         type_mismatched_actions: List[Tuple[str, str]] = []
         for action_name, action_info in all_actions.items():
-            if action_info.associated_types and not chat_context.check_types(action_info.associated_types):
+            if action_info.associated_types and (
+                chat_context is None or not chat_context.check_types(action_info.associated_types)
+            ):
                 associated_types_str = ", ".join(action_info.associated_types)
                 reason = f"适配器不支持（需要: {associated_types_str}）"
                 type_mismatched_actions.append((action_name, reason))

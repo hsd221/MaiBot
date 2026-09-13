@@ -141,7 +141,7 @@ class ChatManager:
             # # 启动自动保存任务
             # asyncio.create_task(self._auto_save_task())
 
-    async def _initialize(self):
+    async def initialize(self):
         """异步初始化"""
         try:
             await self.load_all_streams()
@@ -149,7 +149,7 @@ class ChatManager:
         except Exception as e:
             logger.error(f"聊天管理器启动失败: {str(e)}")
 
-    async def _auto_save_task(self):
+    async def auto_save(self):
         """定期自动保存所有聊天流"""
         while True:
             await asyncio.sleep(300)  # 每5分钟保存一次
@@ -158,6 +158,10 @@ class ChatManager:
                 logger.info("聊天流自动保存完成")
             except Exception as e:
                 logger.error(f"聊天流自动保存失败: {str(e)}")
+
+    # Compatibility for plugins using the older internal lifecycle names.
+    _initialize = initialize
+    _auto_save_task = auto_save
 
     def register_message(self, message: "MessageRecv"):
         """注册消息到聊天流"""
@@ -187,13 +191,31 @@ class ChatManager:
         key = "_".join(components)
         return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
-    def get_stream_id(self, platform: str, id: str, is_group: bool = True) -> str:
+    @staticmethod
+    def get_stream_id(platform: str, id: str, is_group: bool = True) -> str:
         """获取聊天流ID"""
         components = [platform, id] if is_group else [platform, id, "private"]
         key = "_".join(components)
         return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
     async def get_or_create_stream(
+        self, platform: str, user_info: UserInfo, group_info: Optional[GroupInfo] = None
+    ) -> ChatStream:
+        if not hasattr(self, "_stream_creation_lock"):
+            self._stream_creation_lock = asyncio.Lock()
+        async with self._stream_creation_lock:
+            return await self._get_or_create_stream(platform, user_info, group_info)
+
+    @staticmethod
+    def _copy_stream(stream: ChatStream) -> ChatStream:
+        """Copy metadata without traversing the latest message and its stream graph."""
+        result = copy.copy(stream)
+        result.user_info = copy.deepcopy(stream.user_info)
+        result.group_info = copy.deepcopy(stream.group_info)
+        result.context = None
+        return result
+
+    async def _get_or_create_stream(
         self, platform: str, user_info: UserInfo, group_info: Optional[GroupInfo] = None
     ) -> ChatStream:
         """获取或创建聊天流
@@ -220,7 +242,7 @@ class ChatManager:
                     stream.user_info = user_info
                 if group_info:
                     stream.group_info = group_info
-                stream = copy.deepcopy(stream)  # 返回副本以避免外部修改影响缓存
+                stream = self._copy_stream(stream)  # 返回副本以避免外部修改影响缓存
                 from .message import MessageRecv  # 延迟导入，避免循环引用
 
                 if stream_id in self.last_messages and isinstance(self.last_messages[stream_id], MessageRecv):
@@ -277,16 +299,15 @@ class ChatManager:
             logger.error(f"获取或创建聊天流失败: {e}", exc_info=True)
             raise e
 
-        stream = copy.deepcopy(stream)
+        self.streams[stream_id] = stream
+        await self._save_stream(stream)
+        stream = self._copy_stream(stream)
         from .message import MessageRecv  # 延迟导入，避免循环引用
 
         if stream_id in self.last_messages and isinstance(self.last_messages[stream_id], MessageRecv):
             stream.set_context(self.last_messages[stream_id])
         else:
             logger.error(f"聊天流 {stream_id} 不在最后消息列表中，可能是新创建的")
-        # 保存到内存和数据库
-        self.streams[stream_id] = stream
-        await self._save_stream(stream)
         return stream
 
     def get_stream(self, stream_id: str) -> Optional[ChatStream]:
@@ -294,6 +315,7 @@ class ChatManager:
         stream = self.streams.get(stream_id)
         if not stream:
             return None
+        stream = self._copy_stream(stream)
         if stream_id in self.last_messages:
             stream.set_context(self.last_messages[stream_id])
         return stream
@@ -303,7 +325,7 @@ class ChatManager:
     ) -> Optional[ChatStream]:
         """通过信息获取聊天流"""
         stream_id = self._generate_stream_id(platform, user_info, group_info)
-        return self.streams.get(stream_id)
+        return self.get_stream(stream_id)
 
     def get_stream_name(self, stream_id: str) -> Optional[str]:
         """根据 stream_id 获取聊天流名称"""

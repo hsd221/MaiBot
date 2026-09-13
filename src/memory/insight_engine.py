@@ -10,6 +10,7 @@ InsightEngine — 月度恍然大悟引擎 (Phase 3.2)
 from __future__ import annotations
 
 import json
+import asyncio
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
@@ -63,35 +64,9 @@ class InsightEngine:
         Returns:
             list[InsightItem]: 洞察条目列表
         """
-        all_insights: list[InsightItem] = []
-
-        try:
-            insights_1 = self._scan_atomic_patterns()
-            all_insights.extend(insights_1)
-            logger.info("Scan 1 (原子模式) → %d 条洞察", len(insights_1))
-        except Exception as e:
-            logger.error("Scan 1 (原子模式) 异常: %s", e)
-
-        try:
-            insights_2 = self._scan_profile_evolution()
-            all_insights.extend(insights_2)
-            logger.info("Scan 2 (画像演化) → %d 条洞察", len(insights_2))
-        except Exception as e:
-            logger.error("Scan 2 (画像演化) 异常: %s", e)
-
-        try:
-            insights_3 = self._scan_association_network()
-            all_insights.extend(insights_3)
-            logger.info("Scan 3 (关联网络) → %d 条洞察", len(insights_3))
-        except Exception as e:
-            logger.error("Scan 3 (关联网络) 异常: %s", e)
-
-        try:
-            insights_4 = self._scan_dream_synthesis()
-            all_insights.extend(insights_4)
-            logger.info("Scan 4 (梦境综合) → %d 条洞察", len(insights_4))
-        except Exception as e:
-            logger.error("Scan 4 (梦境综合) 异常: %s", e)
+        # Only the read-heavy scans run in a worker. If the caller cancels
+        # during scanning, the discarded result can never reach persistence.
+        all_insights = await asyncio.to_thread(self._scan_monthly_insights)
 
         # 幂等写入 InsightPool，只返回本轮实际新增的洞见。
         saved_insights: list[InsightItem] = []
@@ -132,6 +107,39 @@ class InsightEngine:
         logger.info("月度洞察: %d 条新洞察已保存", len(saved_insights))
         return saved_insights
 
+    def _scan_monthly_insights(self) -> list[InsightItem]:
+        all_insights: list[InsightItem] = []
+
+        try:
+            insights_1 = self._scan_atomic_patterns()
+            all_insights.extend(insights_1)
+            logger.info("Scan 1 (原子模式) → %d 条洞察", len(insights_1))
+        except Exception as e:
+            logger.error("Scan 1 (原子模式) 异常: %s", e)
+
+        try:
+            insights_2 = self._scan_profile_evolution()
+            all_insights.extend(insights_2)
+            logger.info("Scan 2 (画像演化) → %d 条洞察", len(insights_2))
+        except Exception as e:
+            logger.error("Scan 2 (画像演化) 异常: %s", e)
+
+        try:
+            insights_3 = self._scan_association_network()
+            all_insights.extend(insights_3)
+            logger.info("Scan 3 (关联网络) → %d 条洞察", len(insights_3))
+        except Exception as e:
+            logger.error("Scan 3 (关联网络) 异常: %s", e)
+
+        try:
+            insights_4 = self._scan_dream_synthesis()
+            all_insights.extend(insights_4)
+            logger.info("Scan 4 (梦境综合) → %d 条洞察", len(insights_4))
+        except Exception as e:
+            logger.error("Scan 4 (梦境综合) 异常: %s", e)
+
+        return all_insights
+
     # ── Scan 1: 原子模式发现 ────────────────────────────────────────────
 
     def _scan_atomic_patterns(self) -> list[InsightItem]:
@@ -143,16 +151,30 @@ class InsightEngine:
         insights: list[InsightItem] = []
 
         with memory_db:
-            all_active = list(MemoryAtomModel.select().where(MemoryAtomModel.status == "active"))
-            if not all_active:
-                return insights
-
-            # 按类型统计
             type_counts: dict[str, int] = Counter()
-            for atom in all_active:
+            entity_types: dict[str, set[str]] = defaultdict(set)
+            entity_atoms: dict[str, list[str]] = defaultdict(list)
+            active_query = MemoryAtomModel.select(
+                MemoryAtomModel.atom_id, MemoryAtomModel.atom_type, MemoryAtomModel.entities
+            ).where(MemoryAtomModel.status == "active")
+            for atom in active_query.iterator():
                 type_counts[atom.atom_type] += 1
+                if not atom.entities:
+                    continue
+                try:
+                    entities = json.loads(atom.entities)
+                    if not isinstance(entities, list):
+                        continue
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                for ent in entities:
+                    entity = str(ent)
+                    entity_types[entity].add(atom.atom_type)
+                    entity_atoms[entity].append(atom.atom_id)
 
-            total = len(all_active)
+            total = sum(type_counts.values())
+            if not total:
+                return insights
 
             # 发现过度/不足代表的类型
             for atype, expected_pct in _EXPECTED_DISTRIBUTION.items():
@@ -186,22 +208,6 @@ class InsightEngine:
                     )
 
             # 查找跨 3+ 类型的多面实体
-            entity_types: dict[str, set[str]] = defaultdict(set)
-            entity_atoms: dict[str, list[str]] = defaultdict(list)
-            for atom in all_active:
-                if not atom.entities:
-                    continue
-                try:
-                    entities = json.loads(atom.entities)
-                    if not isinstance(entities, list):
-                        continue
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                for ent in entities:
-                    e = str(ent)
-                    entity_types[e].add(atom.atom_type)
-                    entity_atoms[e].append(atom.atom_id)
-
             for entity, types in entity_types.items():
                 if len(types) >= 3:
                     insights.append(
@@ -303,20 +309,21 @@ class InsightEngine:
 
         with memory_db:
             active_atom_ids = MemoryAtomModel.select(MemoryAtomModel.atom_id).where(MemoryAtomModel.status == "active")
-            associations = list(
-                AtomAssociationModel.select().where(
-                    AtomAssociationModel.atom_a_id.in_(active_atom_ids),
-                    AtomAssociationModel.atom_b_id.in_(active_atom_ids),
-                )
+            associations = AtomAssociationModel.select(
+                AtomAssociationModel.atom_a_id,
+                AtomAssociationModel.atom_b_id,
+                AtomAssociationModel.association_type,
+            ).where(
+                AtomAssociationModel.atom_a_id.in_(active_atom_ids),
+                AtomAssociationModel.atom_b_id.in_(active_atom_ids),
             )
-            if not associations:
-                return insights
-
             # 统计每个原子的关联度数
             degree: Counter[str] = Counter()
-            for assoc in associations:
+            type_counts: Counter[str] = Counter()
+            for assoc in associations.iterator():
                 degree[assoc.atom_a_id] += 1
                 degree[assoc.atom_b_id] += 1
+                type_counts[assoc.association_type] += 1
 
             # 查找 hub 原子（度 ≥ 4）
             if degree:
@@ -338,10 +345,9 @@ class InsightEngine:
                         )
 
             # 按关联类型统计
-            type_counts = Counter(a.association_type for a in associations)
             if type_counts:
                 dominant_type, dominant_count = type_counts.most_common(1)[0]
-                total_assoc = len(associations)
+                total_assoc = sum(type_counts.values())
                 dominant_pct = dominant_count / total_assoc * 100
                 if dominant_pct > 50:
                     insights.append(

@@ -279,12 +279,24 @@ async def _backfill_message_placeholder(kind: str, message_id: str, result_text:
                     return
 
                 message_record.processed_plain_text = backfilled_text
-                message_record.save()
+                # Recall markers can be updated by a storage worker after this
+                # row was read; only write the field owned by media backfill.
+                message_record.save(only=[Messages.processed_plain_text])
                 logger.debug(f"后台媒体识别完成，已回填消息 {message_id} 的 {kind} 占位")
                 return
             except Exception as e:
                 logger.warning(f"回填消息 {message_id} 的 {kind} 占位失败: {e}")
                 await asyncio.sleep(0.5 * (attempt + 1))
+
+
+async def backfill_stored_message(message_id: str | None) -> None:
+    """Retry completed media once storage finishes, even after the early retry window."""
+    if not message_id:
+        return
+    for ref in list(_message_media_refs.get(str(message_id), [])):
+        state = _media_task_states.get(ref.task_key)
+        if state is not None and state.status == "done" and state.result_text:
+            await _backfill_message_placeholder(ref.kind, str(message_id), state.result_text, ref.occurrence_index)
 
 
 async def _analyze_media(kind: str, media_data: str) -> Optional[str]:

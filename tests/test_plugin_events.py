@@ -493,15 +493,12 @@ class PluginEventsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(without_message.action_usage, ["wave"])
         self.assertEqual(without_message.additional_data, {"response_is_processed": True, "extra": 1})
         self.assertIsNone(manager._prepare_message(EventType.ON_START))
-        with self.assertRaisesRegex(AssertionError, "必须为非启动/关闭事件提供流ID"):
-            manager._prepare_message(EventType.ON_MESSAGE)
+        self.assertIsNone(manager._prepare_message(EventType.ON_MESSAGE))
 
         missing_stream_manager = SimpleNamespace(get_stream=lambda stream_id: None)
         with patch.object(events_module, "get_chat_manager", return_value=missing_stream_manager):
-            with self.assertRaisesRegex(AssertionError, "未找到流ID"):
-                manager._build_message_from_stream("missing")
-            with self.assertRaisesRegex(AssertionError, "未找到流ID"):
-                manager._transform_event_without_message("missing")
+            self.assertIsNone(manager._build_message_from_stream("missing"))
+            self.assertIsNone(manager._transform_event_without_message("missing"))
 
     async def test_invalid_intercepting_result_is_ignored_without_blocking_processing(self) -> None:
         manager = EventsManager()

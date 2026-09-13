@@ -115,6 +115,8 @@ class EventsManager:
         )
         if transformed_message:
             transformed_message = transformed_message.deepcopy()
+        elif event_type not in [EventType.ON_START, EventType.ON_STOP]:
+            return True, None
 
         # 2. 获取并遍历处理器
         handlers = self._events_subscribers.get(event_type, [])
@@ -326,11 +328,15 @@ class EventsManager:
         llm_prompt: Optional[str] = None,
         llm_response: Optional["LLMGenerationDataModel"] = None,
         extra_data: Optional[Dict[str, Any]] = None,
-    ) -> MaiMessages:
+    ) -> Optional[MaiMessages]:
         """从流ID构建消息"""
         chat_stream = get_chat_manager().get_stream(stream_id)
-        assert chat_stream, f"未找到流ID为 {stream_id} 的聊天流"
+        if not chat_stream or chat_stream.context is None:
+            logger.warning("事件消息流不存在或上下文为空", event_code="event.stream_unavailable")
+            return None
         message = chat_stream.context.get_last_message()
+        if message is None:
+            return None
         return self._transform_event_message(message, llm_prompt, llm_response, extra_data)
 
     def _transform_event_without_message(
@@ -340,10 +346,12 @@ class EventsManager:
         llm_response: Optional["LLMGenerationDataModel"] = None,
         action_usage: Optional[List[str]] = None,
         extra_data: Optional[Dict[str, Any]] = None,
-    ) -> MaiMessages:
+    ) -> Optional[MaiMessages]:
         """没有message对象时进行转换"""
         chat_stream = get_chat_manager().get_stream(stream_id)
-        assert chat_stream, f"未找到流ID为 {stream_id} 的聊天流"
+        if not chat_stream:
+            logger.warning("事件消息流不存在", event_code="event.stream_unavailable")
+            return None
         return MaiMessages(
             stream_id=stream_id,
             llm_prompt=llm_prompt,
@@ -372,7 +380,9 @@ class EventsManager:
             return self._transform_event_message(message, llm_prompt, llm_response, extra_data)
 
         if event_type not in [EventType.ON_START, EventType.ON_STOP]:
-            assert stream_id, "如果没有消息，必须为非启动/关闭事件提供流ID"
+            if not stream_id:
+                logger.warning("事件缺少流ID", event_code="event.stream_id_missing")
+                return None
             if event_type in [EventType.ON_MESSAGE, EventType.ON_PLAN, EventType.POST_LLM, EventType.AFTER_LLM]:
                 return self._build_message_from_stream(stream_id, llm_prompt, llm_response, extra_data)
             else:

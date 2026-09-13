@@ -37,6 +37,7 @@ export default withMermaid(
               { text: '插件市场', link: '/guide/plugin-market' },
               { text: '部署指南', link: '/guide/deployment' },
               { text: '架构概览', link: '/guide/architecture' },
+              { text: '审计修复兼容说明', link: '/guide/audit-remediation' },
             ],
           },
         ],

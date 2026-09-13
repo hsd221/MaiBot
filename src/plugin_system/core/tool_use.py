@@ -17,6 +17,7 @@ class ToolExecutor:
     """独立的工具执行器组件
 
     可以直接输入聊天消息内容，自动判断并执行相应的工具，返回结构化的工具执行结果。
+    缓存仅属于当前执行器实例；cache_ttl 表示命中次数，不承诺跨回复复用。
     """
 
     def __init__(self, chat_id: str, enable_cache: bool = True, cache_ttl: int = 3):
@@ -204,7 +205,8 @@ class ToolExecutor:
         """
         try:
             function_name = tool_call.func_name
-            function_args = tool_call.args or {}
+            # ToolCall 参数也会被规划器和日志引用；执行标记不能污染共享对象。
+            function_args = dict(tool_call.args or {})
             function_args["llm_called"] = True  # 标记为LLM调用
 
             # 获取对应工具实例

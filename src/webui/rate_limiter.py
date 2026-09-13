@@ -7,7 +7,7 @@ import fnmatch
 import ipaddress
 import time
 from collections import defaultdict
-from typing import Dict, Tuple, Optional
+from typing import Callable, Dict, Tuple, Optional
 from fastapi import Request, HTTPException
 from src.common.logger import get_logger
 from src.config.config import global_config
@@ -51,6 +51,44 @@ def is_trusted_proxy(peer_ip: str, config=None) -> bool:
     return False
 
 
+def get_forwarded_client_ip(request: Request, trusted_proxy: Callable[[str], bool]) -> str:
+    """Resolve only the trusted suffix of a proxy chain; malformed hops fail closed."""
+    peer_ip = request.client.host if request.client else ""
+    try:
+        ipaddress.ip_address(peer_ip)
+    except ValueError:
+        return "unknown"
+    if not trusted_proxy(peer_ip):
+        return peer_ip
+
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded is not None:
+        candidate = peer_ip
+        for raw_hop in reversed(forwarded.split(",")):
+            if not trusted_proxy(candidate):
+                return candidate
+            candidate = raw_hop.strip()
+            try:
+                ipaddress.ip_address(candidate)
+            except ValueError:
+                # A proxy-enabled request with malformed forwarding data is
+                # not attributable to the peer itself (often a loopback
+                # allowlisted proxy). Fail closed instead of allowing a
+                # forged localhost/whitelist identity.
+                return "unknown"
+        return candidate
+
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip is None:
+        return peer_ip
+    real_ip = real_ip.strip()
+    try:
+        ipaddress.ip_address(real_ip)
+    except ValueError:
+        return "unknown"
+    return real_ip
+
+
 class RateLimiter:
     """
     简单的内存请求频率限制器
@@ -79,17 +117,7 @@ class RateLimiter:
 
     def _get_client_ip(self, request: Request) -> str:
         """获取客户端 IP 地址"""
-        peer_ip = request.client.host if request.client else ""
-        if self._is_trusted_proxy(peer_ip):
-            forwarded = request.headers.get("X-Forwarded-For")
-            if forwarded:
-                client_ip = forwarded.split(",", maxsplit=1)[0].strip()
-                if self._is_valid_ip(client_ip):
-                    return client_ip
-            real_ip = request.headers.get("X-Real-IP", "").strip()
-            if self._is_valid_ip(real_ip):
-                return real_ip
-        return peer_ip if self._is_valid_ip(peer_ip) else "unknown"
+        return get_forwarded_client_ip(request, self._is_trusted_proxy)
 
     def _ensure_tracking_capacity(self, key: str) -> None:
         if key in self._requests or len(self._requests) < self._max_tracked_keys:

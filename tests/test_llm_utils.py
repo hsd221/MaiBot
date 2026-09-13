@@ -208,7 +208,7 @@ class LLMRequestHelpersTest(unittest.IsolatedAsyncioTestCase):
             original_info = LLMRequest._get_original_error_info(exc)
 
         self.assertIn("底层异常类型: KeyError", original_info)
-        self.assertIn("底层异常信息: 'root'", original_info)
+        self.assertNotIn("root", original_info)
 
     async def test_generate_response_for_images_labels_and_sends_frames_in_order(self) -> None:
         request = LLMRequest(self.task, request_type="image")

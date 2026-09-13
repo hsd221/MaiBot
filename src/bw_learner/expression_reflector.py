@@ -58,8 +58,8 @@ class ExpressionReflector:
             time_since_last_ask = current_time - self.last_ask_time
 
             # 5-10分钟间隔，随机选择
-            min_interval = 10 * 60  # 5分钟
-            max_interval = 15 * 60  # 10分钟
+            min_interval = 10 * 60  # 10分钟
+            max_interval = 15 * 60  # 15分钟
             interval = random.uniform(min_interval, max_interval)
 
             logger.info(

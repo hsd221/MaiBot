@@ -12,6 +12,7 @@ import time
 from typing import List, Dict, Any, Tuple, Optional
 from src.common.data_models.database_data_model import DatabaseMessages
 from src.common.database.database_model import Images
+from src.common.message_repository import DEFAULT_MESSAGE_LIMIT
 from src.chat.utils.utils import is_bot_self
 from src.chat.utils.chat_message_builder import (
     get_raw_msg_by_timestamp,
@@ -37,7 +38,11 @@ from src.chat.utils.chat_message_builder import (
 
 
 def get_messages_by_time(
-    start_time: float, end_time: float, limit: int = 0, limit_mode: str = "latest", filter_mai: bool = False
+    start_time: float,
+    end_time: float,
+    limit: int = DEFAULT_MESSAGE_LIMIT,
+    limit_mode: str = "latest",
+    filter_mai: bool = False,
 ) -> List[DatabaseMessages]:
     """
     获取指定时间范围内的消息
@@ -45,7 +50,7 @@ def get_messages_by_time(
     Args:
         start_time: 开始时间戳
         end_time: 结束时间戳
-        limit: 限制返回的消息数量，0为不限制
+        limit: 默认最多返回1000条，显式传入0表示不限制
         limit_mode: 当limit>0时生效，'earliest'表示获取最早的记录，'latest'表示获取最新的记录
         filter_mai: 是否过滤麦麦自身的消息，默认为False
 
@@ -68,7 +73,7 @@ def get_messages_by_time_in_chat(
     chat_id: str,
     start_time: float,
     end_time: float,
-    limit: int = 0,
+    limit: int = DEFAULT_MESSAGE_LIMIT,
     limit_mode: str = "latest",
     filter_mai: bool = False,
     filter_command: bool = False,
@@ -81,7 +86,7 @@ def get_messages_by_time_in_chat(
         chat_id: 聊天ID
         start_time: 开始时间戳
         end_time: 结束时间戳
-        limit: 限制返回的消息数量，0为不限制
+        limit: 默认最多返回1000条，显式传入0表示不限制
         limit_mode: 当limit>0时生效，'earliest'表示获取最早的记录，'latest'表示获取最新的记录
         filter_mai: 是否过滤麦麦自身的消息，默认为False
         filter_command: 是否过滤命令消息，默认为False
@@ -119,7 +124,7 @@ def get_messages_by_time_in_chat_inclusive(
     chat_id: str,
     start_time: float,
     end_time: float,
-    limit: int = 0,
+    limit: int = DEFAULT_MESSAGE_LIMIT,
     limit_mode: str = "latest",
     filter_mai: bool = False,
     filter_command: bool = False,
@@ -132,7 +137,7 @@ def get_messages_by_time_in_chat_inclusive(
         chat_id: 聊天ID
         start_time: 开始时间戳（包含）
         end_time: 结束时间戳（包含）
-        limit: 限制返回的消息数量，0为不限制
+        limit: 默认最多返回1000条，显式传入0表示不限制
         limit_mode: 当limit>0时生效，'earliest'表示获取最早的记录，'latest'表示获取最新的记录
         filter_mai: 是否过滤麦麦自身的消息，默认为False
 
@@ -170,7 +175,7 @@ def get_messages_by_time_in_chat_for_users(
     start_time: float,
     end_time: float,
     person_ids: List[str],
-    limit: int = 0,
+    limit: int = DEFAULT_MESSAGE_LIMIT,
     limit_mode: str = "latest",
 ) -> List[DatabaseMessages]:
     """
@@ -181,7 +186,7 @@ def get_messages_by_time_in_chat_for_users(
         start_time: 开始时间戳
         end_time: 结束时间戳
         person_ids: 用户ID列表
-        limit: 限制返回的消息数量，0为不限制
+        limit: 默认最多返回1000条，显式传入0表示不限制
         limit_mode: 当limit>0时生效，'earliest'表示获取最早的记录，'latest'表示获取最新的记录
 
     Returns:
@@ -202,7 +207,11 @@ def get_messages_by_time_in_chat_for_users(
 
 
 def get_random_chat_messages(
-    start_time: float, end_time: float, limit: int = 0, limit_mode: str = "latest", filter_mai: bool = False
+    start_time: float,
+    end_time: float,
+    limit: int = DEFAULT_MESSAGE_LIMIT,
+    limit_mode: str = "latest",
+    filter_mai: bool = False,
 ) -> List[DatabaseMessages]:
     """
     随机选择一个聊天，返回该聊天在指定时间范围内的消息
@@ -210,7 +219,7 @@ def get_random_chat_messages(
     Args:
         start_time: 开始时间戳
         end_time: 结束时间戳
-        limit: 限制返回的消息数量，0为不限制
+        limit: 默认最多返回1000条，显式传入0表示不限制
         limit_mode: 当limit>0时生效，'earliest'表示获取最早的记录，'latest'表示获取最新的记录
         filter_mai: 是否过滤麦麦自身的消息，默认为False
 
@@ -230,7 +239,11 @@ def get_random_chat_messages(
 
 
 def get_messages_by_time_for_users(
-    start_time: float, end_time: float, person_ids: List[str], limit: int = 0, limit_mode: str = "latest"
+    start_time: float,
+    end_time: float,
+    person_ids: List[str],
+    limit: int = DEFAULT_MESSAGE_LIMIT,
+    limit_mode: str = "latest",
 ) -> List[DatabaseMessages]:
     """
     获取指定用户在所有聊天中指定时间范围内的消息
@@ -239,7 +252,7 @@ def get_messages_by_time_for_users(
         start_time: 开始时间戳
         end_time: 结束时间戳
         person_ids: 用户ID列表
-        limit: 限制返回的消息数量，0为不限制
+        limit: 默认最多返回1000条，显式传入0表示不限制
         limit_mode: 当limit>0时生效，'earliest'表示获取最早的记录，'latest'表示获取最新的记录
 
     Returns:
@@ -255,13 +268,15 @@ def get_messages_by_time_for_users(
     return get_raw_msg_by_timestamp_with_users(start_time, end_time, person_ids, limit, limit_mode)
 
 
-def get_messages_before_time(timestamp: float, limit: int = 0, filter_mai: bool = False) -> List[DatabaseMessages]:
+def get_messages_before_time(
+    timestamp: float, limit: int = DEFAULT_MESSAGE_LIMIT, filter_mai: bool = False
+) -> List[DatabaseMessages]:
     """
     获取指定时间戳之前的消息
 
     Args:
         timestamp: 时间戳
-        limit: 限制返回的消息数量，0为不限制
+        limit: 默认最多返回1000条，显式传入0表示不限制
         filter_mai: 是否过滤麦麦自身的消息，默认为False
 
     Returns:
@@ -282,7 +297,7 @@ def get_messages_before_time(timestamp: float, limit: int = 0, filter_mai: bool 
 def get_messages_before_time_in_chat(
     chat_id: str,
     timestamp: float,
-    limit: int = 0,
+    limit: int = DEFAULT_MESSAGE_LIMIT,
     filter_mai: bool = False,
     filter_intercept_message_level: Optional[int] = None,
 ) -> List[DatabaseMessages]:
@@ -292,7 +307,7 @@ def get_messages_before_time_in_chat(
     Args:
         chat_id: 聊天ID
         timestamp: 时间戳
-        limit: 限制返回的消息数量，0为不限制
+        limit: 默认最多返回1000条，显式传入0表示不限制
         filter_mai: 是否过滤麦麦自身的消息，默认为False
 
     Returns:
@@ -321,7 +336,7 @@ def get_messages_before_time_in_chat(
 
 
 def get_messages_before_time_for_users(
-    timestamp: float, person_ids: List[str], limit: int = 0
+    timestamp: float, person_ids: List[str], limit: int = DEFAULT_MESSAGE_LIMIT
 ) -> List[DatabaseMessages]:
     """
     获取指定用户在指定时间戳之前的消息
@@ -329,7 +344,7 @@ def get_messages_before_time_for_users(
     Args:
         timestamp: 时间戳
         person_ids: 用户ID列表
-        limit: 限制返回的消息数量，0为不限制
+        limit: 默认最多返回1000条，显式传入0表示不限制
 
     Returns:
         List[Dict[str, Any]]: 消息列表

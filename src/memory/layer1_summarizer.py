@@ -1127,7 +1127,7 @@ class GroupTopicSummarizer:
         return f"msg_{self._message_counter}"
 
     def _trim_if_needed(self, stream_id: str) -> None:
-        """如果话题数超出上限，合并最不活跃的话题"""
+        """如果话题数超出上限，关闭最不活跃的话题，保留各自摘要。"""
         if stream_id not in self.topics:
             return
         active = {tid: t for tid, t in self.topics[stream_id].items() if not t.is_closed}
@@ -1137,13 +1137,10 @@ class GroupTopicSummarizer:
         # 按 last_updated 升序排列，最久未更新的排最前。同分再按 topic_id 排序，
         # 避免依赖字典构造顺序导致测试和重启后的裁剪对象漂移。
         sorted_active = sorted(active.items(), key=lambda x: (x[1].last_updated, x[0]))
-        # 只合并超出上限的最旧话题；原实现把除最新外全部合并，11 个话题会直接塌成 1 个。
-        newest_tid = sorted_active[-1][0]
+        # 容量限制不代表话题语义相同，不能把旧内容并入最新话题。
         overflow = len(sorted_active) - self.max_topics
-        to_merge = sorted_active[:overflow]
-
-        for tid, _ in to_merge:
-            self.merge_topics(stream_id, newest_tid, tid)
+        for tid, _ in sorted_active[:overflow]:
+            self.close_topic(stream_id, tid)
 
     @staticmethod
     def _merge_keywords(

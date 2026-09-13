@@ -22,7 +22,7 @@ from src.plugin_system import message_api
 ### 1. 按照事件查询消息
 ```python
 def get_messages_by_time(
-    start_time: float, end_time: float, limit: int = 0, limit_mode: str = "latest", filter_mai: bool = False
+    start_time: float, end_time: float, limit: int = 1000, limit_mode: str = "latest", filter_mai: bool = False
 ) -> List[DatabaseMessages]:
 ```
 获取指定时间范围内的消息。
@@ -30,7 +30,7 @@ def get_messages_by_time(
 **Args:**
 - `start_time` (float): 开始时间戳
 - `end_time` (float): 结束时间戳
-- `limit` (int): 限制返回消息数量，0为不限制
+- `limit` (int): 限制返回消息数量，默认1000条；显式0为不限制
 - `limit_mode` (str): 限制模式，`"earliest"`获取最早记录，`"latest"`获取最新记录
 - `filter_mai` (bool): 是否过滤掉机器人的消息，默认False
 
@@ -45,7 +45,7 @@ def get_messages_by_time_in_chat(
     chat_id: str,
     start_time: float,
     end_time: float,
-    limit: int = 0,
+    limit: int = 1000,
     limit_mode: str = "latest",
     filter_mai: bool = False,
 ) -> List[DatabaseMessages]:
@@ -56,7 +56,7 @@ def get_messages_by_time_in_chat(
 - `chat_id` (str): 聊天ID
 - `start_time` (float): 开始时间戳
 - `end_time` (float): 结束时间戳
-- `limit` (int): 限制返回消息数量，0为不限制
+- `limit` (int): 限制返回消息数量，默认1000条；显式0为不限制
 - `limit_mode` (str): 限制模式，`"earliest"`获取最早记录，`"latest"`获取最新记录
 - `filter_mai` (bool): 是否过滤掉机器人的消息，默认False
 
@@ -70,7 +70,7 @@ def get_messages_by_time_in_chat_inclusive(
     chat_id: str,
     start_time: float,
     end_time: float,
-    limit: int = 0,
+    limit: int = 1000,
     limit_mode: str = "latest",
     filter_mai: bool = False,
     filter_command: bool = False,
@@ -82,7 +82,7 @@ def get_messages_by_time_in_chat_inclusive(
 - `chat_id` (str): 聊天ID
 - `start_time` (float): 开始时间戳（包含）
 - `end_time` (float): 结束时间戳（包含）
-- `limit` (int): 限制返回消息数量，0为不限制
+- `limit` (int): 限制返回消息数量，默认1000条；显式0为不限制
 - `limit_mode` (str): 限制模式，`"earliest"`获取最早记录，`"latest"`获取最新记录
 - `filter_mai` (bool): 是否过滤掉机器人的消息，默认False
 - `filter_command` (bool): 是否过滤命令消息，默认False
@@ -98,7 +98,7 @@ def get_messages_by_time_in_chat_for_users(
     start_time: float,
     end_time: float,
     person_ids: List[str],
-    limit: int = 0,
+    limit: int = 1000,
     limit_mode: str = "latest",
 ) -> List[DatabaseMessages]:
 ```
@@ -109,7 +109,7 @@ def get_messages_by_time_in_chat_for_users(
 - `start_time` (float): 开始时间戳
 - `end_time` (float): 结束时间戳
 - `person_ids` (List[str]): 用户ID列表
-- `limit` (int): 限制返回消息数量，0为不限制
+- `limit` (int): 限制返回消息数量，默认1000条；显式0为不限制
 - `limit_mode` (str): 限制模式，`"earliest"`获取最早记录，`"latest"`获取最新记录
 
 **Returns:**
@@ -121,7 +121,7 @@ def get_messages_by_time_in_chat_for_users(
 def get_random_chat_messages(
     start_time: float,
     end_time: float,
-    limit: int = 0,
+    limit: int = 1000,
     limit_mode: str = "latest",
     filter_mai: bool = False,
 ) -> List[DatabaseMessages]:
@@ -131,7 +131,7 @@ def get_random_chat_messages(
 **Args:**
 - `start_time` (float): 开始时间戳
 - `end_time` (float): 结束时间戳
-- `limit` (int): 限制返回消息数量，0为不限制
+- `limit` (int): 限制返回消息数量，默认1000条；显式0为不限制
 - `limit_mode` (str): 限制模式，`"earliest"`获取最早记录，`"latest"`获取最新记录
 - `filter_mai` (bool): 是否过滤掉机器人的消息，默认False
 
@@ -145,7 +145,7 @@ def get_messages_by_time_for_users(
     start_time: float,
     end_time: float,
     person_ids: List[str],
-    limit: int = 0,
+    limit: int = 1000,
     limit_mode: str = "latest",
 ) -> List[DatabaseMessages]:
 ```
@@ -155,7 +155,7 @@ def get_messages_by_time_for_users(
 - `start_time` (float): 开始时间戳
 - `end_time` (float): 结束时间戳
 - `person_ids` (List[str]): 用户ID列表
-- `limit` (int): 限制返回消息数量，0为不限制
+- `limit` (int): 限制返回消息数量，默认1000条；显式0为不限制
 - `limit_mode` (str): 限制模式，`"earliest"`获取最早记录，`"latest"`获取最新记录
 
 **Returns:**
@@ -166,7 +166,7 @@ def get_messages_by_time_for_users(
 ```python
 def get_messages_before_time(
     timestamp: float,
-    limit: int = 0,
+    limit: int = 1000,
     filter_mai: bool = False,
 ) -> List[DatabaseMessages]:
 ```
@@ -174,7 +174,7 @@ def get_messages_before_time(
 
 **Args:**
 - `timestamp` (float): 时间戳
-- `limit` (int): 限制返回消息数量，0为不限制
+- `limit` (int): 限制返回消息数量，默认1000条；显式0为不限制
 - `filter_mai` (bool): 是否过滤掉机器人的消息，默认False
 
 **Returns:**
@@ -186,7 +186,7 @@ def get_messages_before_time(
 def get_messages_before_time_in_chat(
     chat_id: str,
     timestamp: float,
-    limit: int = 0,
+    limit: int = 1000,
     filter_mai: bool = False,
 ) -> List[DatabaseMessages]:
 ```
@@ -195,7 +195,7 @@ def get_messages_before_time_in_chat(
 **Args:**
 - `chat_id` (str): 聊天ID
 - `timestamp` (float): 时间戳
-- `limit` (int): 限制返回消息数量，0为不限制
+- `limit` (int): 限制返回消息数量，默认1000条；显式0为不限制
 - `filter_mai` (bool): 是否过滤掉机器人的消息，默认False
 
 **Returns:**
@@ -207,7 +207,7 @@ def get_messages_before_time_in_chat(
 def get_messages_before_time_for_users(
     timestamp: float,
     person_ids: List[str],
-    limit: int = 0,
+    limit: int = 1000,
 ) -> List[DatabaseMessages]:
 ```
 获取指定用户在指定时间戳之前的消息。
@@ -215,7 +215,7 @@ def get_messages_before_time_for_users(
 **Args:**
 - `timestamp` (float): 时间戳
 - `person_ids` (List[str]): 用户ID列表
-- `limit` (int): 限制返回消息数量，0为不限制
+- `limit` (int): 限制返回消息数量，默认1000条；显式0为不限制
 
 **Returns:**
 - `List[DatabaseMessages]` - 消息列表
@@ -360,6 +360,10 @@ def filter_mai_messages(
 
 **Returns:**
 - `List[DatabaseMessages]` - 过滤后的消息列表
+
+## 升级兼容
+
+省略 `limit` 的查询现在默认最多返回 1000 条，防止完整历史驻留内存。已有显式上限、`get_recent_messages` 的 100 条缺省、`limit_mode` 和返回排序保持原契约。需要全部历史时显式传入 `limit=0`，或按时间窗口分批查询。
 
 ## 注意事项
 

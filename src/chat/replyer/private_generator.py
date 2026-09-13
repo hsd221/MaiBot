@@ -79,7 +79,7 @@ class PrivateReplyer:
         think_level: int = 1,
         stream_id: Optional[str] = None,
         reply_message: Optional[DatabaseMessages] = None,
-        reply_time_point: Optional[float] = time.time(),
+        reply_time_point: Optional[float] = None,
         unknown_words: Optional[List[str]] = None,
         log_reply: bool = True,
     ) -> Tuple[bool, LLMGenerationDataModel]:

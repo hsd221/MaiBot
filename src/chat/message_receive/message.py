@@ -1,7 +1,6 @@
 import time
 import asyncio
 import json
-import urllib3
 
 from abc import abstractmethod
 from dataclasses import dataclass
@@ -31,9 +30,6 @@ from .media_background import (
 install(extra_lines=3)
 
 logger = get_logger("chat_message")
-
-# 禁用SSL警告
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # VLM 处理并发限制（避免同时处理太多图片导致卡死）
 _vlm_semaphore = asyncio.Semaphore(3)
@@ -191,7 +187,7 @@ class MessageRecv(Message):
 
         self.priority_mode = "interest"
         self.priority_info = None
-        self.interest_value: float = None  # type: ignore
+        self.interest_value: float = 0.0
 
         self.key_words = []
         self.key_words_lite = []
@@ -391,7 +387,7 @@ class MessageRecv(Message):
             else:
                 return ""
         except Exception as e:
-            logger.error(f"处理消息段失败: {str(e)}, 类型: {segment.type}, 数据: {segment.data}")
+            logger.error("处理消息段失败", segment_type=segment.type, error_type=type(e).__name__)
             return f"[处理失败的{segment.type}消息]"
 
 
@@ -470,7 +466,7 @@ class MessageProcessBase(Message):
             else:
                 return f"[{segment.type}:{str(segment.data)}]"
         except Exception as e:
-            logger.error(f"处理消息段失败: {str(e)}, 类型: {segment.type}, 数据: {segment.data}")
+            logger.error("处理消息段失败", segment_type=segment.type, error_type=type(e).__name__)
             return f"[处理失败的{segment.type}消息]"
 
     def _generate_detailed_text(self) -> str:
@@ -578,6 +574,8 @@ class MessageSending(MessageProcessBase):
 
     def to_dict(self):
         ret = super().to_dict()
+        # The adapter wire protocol routes private delivery by the peer user.
+        # message_info on this object still identifies the bot for local storage.
         ret["message_info"]["user_info"] = self.chat_stream.user_info.to_dict()
         return ret
 

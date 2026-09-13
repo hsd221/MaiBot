@@ -64,6 +64,7 @@ class MessageRepositoryTest(unittest.TestCase):
             sorted_desc = message_repository.find_messages(
                 {"time": {"$gte": 1.0}, "unknown": "ignored"},
                 sort=[("time", -1), ("time", 0), ("missing", 1)],
+                limit=0,
             )
             without_bot = message_repository.find_messages({"chat_id": "chat-1"}, filter_bot=True)
             without_commands = message_repository.find_messages({"chat_id": "chat-1"}, filter_command=True)

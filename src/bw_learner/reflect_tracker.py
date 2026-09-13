@@ -79,11 +79,11 @@ class ReflectTracker:
                 context_block=context_block,
             )
 
-            logger.info(f"ReflectTracker LLM Prompt: {prompt}")
+            logger.debug("表达反思模型提示词", prompt=prompt)
 
             response, _ = await self.judge_model.generate_response_async(prompt, temperature=0.1)
 
-            logger.info(f"ReflectTracker LLM Response: {response}")
+            logger.debug("表达反思模型响应", response=response)
 
             # Parse JSON
             import json

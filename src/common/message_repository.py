@@ -7,6 +7,7 @@ from src.common.database.database_model import Messages
 from src.common.logger import get_logger
 
 logger = get_logger(__name__)
+DEFAULT_MESSAGE_LIMIT = 1000
 
 
 def _model_to_instance(model_instance: Model) -> DatabaseMessages:
@@ -19,7 +20,7 @@ def _model_to_instance(model_instance: Model) -> DatabaseMessages:
 def find_messages(
     message_filter: dict[str, Any],
     sort: Optional[List[tuple[str, int]]] = None,
-    limit: int = 0,
+    limit: int = DEFAULT_MESSAGE_LIMIT,
     limit_mode: str = "latest",
     filter_bot=False,
     filter_command=False,
@@ -31,7 +32,7 @@ def find_messages(
     Args:
         message_filter: 查询过滤器字典，键为模型字段名，值为期望值或包含操作符的字典 (例如 {'$gt': value}).
         sort: 排序条件列表，例如 [('time', 1)] (1 for asc, -1 for desc)。仅在 limit 为 0 时生效。
-        limit: 返回的最大文档数，0表示不限制。
+        limit: 返回的最大文档数，默认 1000；显式传入 0 表示不限制。
         limit_mode: 当 limit > 0 时生效。 'earliest' 表示获取最早的记录， 'latest' 表示获取最新的记录（结果仍按时间正序排列）。默认为 'latest'。
 
     Returns:

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import HTTPException
 from peewee import SqliteDatabase
@@ -68,6 +68,16 @@ class EmojiRoutesTestCase(unittest.IsolatedAsyncioTestCase):
         self.auth_patch.start()
         self.cache_dir_patch.start()
         self.registered_dir_patch.start()
+
+        async def delete_from_test_database(emoji_hash):
+            return bool(Emoji.delete().where(Emoji.emoji_hash == emoji_hash).execute())
+
+        self.manager_patch = patch(
+            "src.chat.emoji_system.emoji_manager.get_emoji_manager",
+            return_value=SimpleNamespace(delete_emoji=AsyncMock(side_effect=delete_from_test_database)),
+        )
+        self.manager_patch.start()
+        self.addCleanup(self.manager_patch.stop)
         emoji_routes._thumbnail_locks.clear()
         emoji_routes._thumbnail_lock_users.clear()
         emoji_routes._generating_thumbnails.clear()

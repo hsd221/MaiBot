@@ -60,8 +60,7 @@ class LearnerUtilsTest(unittest.TestCase):
                 nickname="Mai",
                 alias_names=["麦麦"],
                 qq_account="10000",
-                telegram_account="tg-bot",
-                platforms=["wx:wx-bot"],
+                platforms=["telegram:tg-bot", "wx:wx-bot"],
             )
         )
 

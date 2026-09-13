@@ -43,23 +43,6 @@ if TYPE_CHECKING:
     from src.common.data_models.message_data_model import ReplySetModel
 
 
-ERROR_LOOP_INFO = {
-    "loop_plan_info": {
-        "action_result": {
-            "action_type": "error",
-            "action_data": {},
-            "reasoning": "循环处理失败",
-        },
-    },
-    "loop_action_info": {
-        "action_taken": False,
-        "reply_text": "",
-        "command": "",
-        "taken_time": time.time(),
-    },
-}
-
-
 install(extra_lines=3)
 
 # 注释：原来的动作修改超时常量已移除，因为改为顺序执行
@@ -171,6 +154,7 @@ class BrainChatting:
     def end_cycle(self, loop_info, cycle_timers):
         self._current_cycle_detail.set_loop_info(loop_info)
         self.history_loop.append(self._current_cycle_detail)
+        del self.history_loop[:-100]
         self._current_cycle_detail.timers = cycle_timers
         self._current_cycle_detail.end_time = time.time()
 
@@ -196,7 +180,7 @@ class BrainChatting:
             limit=0,
             filter_mai=True,
             filter_command=False,
-            filter_intercept_message_level=1,
+            filter_intercept_message_level=0,
         )
 
     async def _loopbody(self):  # sourcery skip: hoist-if-from-if
@@ -329,7 +313,10 @@ class BrainChatting:
             spawn_background_task(self._archive_recent_messages(recent_messages_list), name="archive-messages")
 
     async def _observe_native(self, recent_messages_list: List["DatabaseMessages"]) -> bool:
-        async with prompt_manager.async_message_scope(self.chat_stream.context.get_template_name()):
+        self.chat_stream = get_chat_manager().get_stream(self.stream_id) or self.chat_stream
+        self.tool_registry.chat_stream = self.chat_stream
+        context = self.chat_stream.context
+        async with prompt_manager.async_message_scope(context.get_template_name() if context else None):
             cycle_timers, thinking_id = self.start_cycle()
             logger.debug(f"{self.log_prefix} 开始第{self._cycle_counter}次思考")
 
@@ -531,31 +518,30 @@ class BrainChatting:
             pass
 
     async def _main_chat_loop(self):
-        """主循环，持续进行计划并可能回复消息，直到被外部取消。"""
+        """Run in one supervised task; back off repeated failures without spawning replacements."""
+        retry_delay = 3
         try:
             while self.running:
-                # 主循环
-                success = await self._loopbody()
-                if not success:
-                    # 选择了 complete，等待新消息
-                    logger.debug(f"{self.log_prefix} 选择了 complete，等待新消息")
-                    await self._wait_for_new_message()
-                    # 有新消息后继续循环
-                    continue
-                await asyncio.sleep(0.1)
+                try:
+                    success = await self._loopbody()
+                    retry_delay = 3
+                    if not success:
+                        await self._wait_for_new_message()
+                        continue
+                    await asyncio.sleep(0.1)
+                except Exception:
+                    logger.exception(f"{self.log_prefix} 聊天循环异常，将于 {retry_delay}s 后重试")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60)
         except asyncio.CancelledError:
-            # 设置了关闭标志位后被取消是正常流程
-            logger.info(f"{self.log_prefix} 麦麦已关闭聊天")
-        except Exception:
-            logger.exception(f"{self.log_prefix} 聊天循环异常，将于3s后尝试重新启动")
-            await asyncio.sleep(3)
-            self._loop_task = asyncio.create_task(self._main_chat_loop())
-        logger.error(f"{self.log_prefix} 结束了当前聊天循环")
+            logger.info(f"{self.log_prefix} 聊天循环已取消")
+        finally:
+            self.running = False
 
     async def _wait_for_new_message(self):
         """等待新消息到达"""
         last_check_time = self.last_read_time
-        check_interval = 1.0  # 每秒检查一次
+        check_interval = 30.0  # 入站事件立即唤醒；数据库轮询仅兜底遗漏通知
 
         # 清除事件状态，准备等待新消息
         self._new_message_event.clear()
@@ -570,7 +556,7 @@ class BrainChatting:
                 limit_mode="latest",
                 filter_mai=True,
                 filter_command=False,
-                filter_intercept_message_level=1,
+                filter_intercept_message_level=0,
             )
 
             # 这里只负责唤醒，读取游标由下一轮 TurnGate 在聚合完成后推进
@@ -651,7 +637,7 @@ class BrainChatting:
                 limit_mode="latest",
                 filter_mai=True,
                 filter_command=False,
-                filter_intercept_message_level=1,
+                filter_intercept_message_level=0,
             )
         )
 

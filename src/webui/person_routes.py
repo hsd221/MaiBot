@@ -5,13 +5,14 @@
 
 from fastapi import APIRouter, HTTPException, Header, Query, Cookie
 from pydantic import BaseModel, Field
-from typing import Any, Optional, List, Dict
+from typing import Any, Iterator, Optional, List, Dict
 from src.common.logger import get_logger
 from src.webui.error_utils import internal_server_error
 from .auth import verify_auth_token_from_cookie_or_header
 import json
 import zlib
 from collections import Counter
+from starlette.concurrency import run_in_threadpool
 from datetime import datetime
 
 from src.memory.user_profile import ProfileStore, UserProfile
@@ -282,22 +283,14 @@ def profile_to_person_dict(profile: UserProfile) -> Dict[str, Any]:
     }
 
 
-def list_profile_person_dicts(
+def _iter_profile_person_dicts(
     search: Optional[str] = None,
     platform: Optional[str] = None,
     is_known: Optional[bool] = None,
-    limit: Optional[int] = None,
-) -> List[Dict[str, Any]]:
-    """列出新记忆系统中的画像，并按旧 PersonInfo 查询条件过滤。"""
-    profile_store = ProfileStore()
-    persons: List[Dict[str, Any]] = []
+) -> Iterator[Dict[str, Any]]:
+    """流式兼容旧 PersonInfo 筛选，避免 N+1 查询和完整画像列表。"""
     search_text = search.strip().lower() if search else ""
-
-    for user_id in profile_store.list_profiles():
-        profile = profile_store.get_profile(user_id)
-        if profile is None:
-            continue
-
+    for profile in ProfileStore().iter_profiles():
         person = profile_to_person_dict(profile)
         if platform and person["platform"] != platform:
             continue
@@ -305,12 +298,33 @@ def list_profile_person_dicts(
             continue
         if search_text and search_text not in _profile_search_text(person):
             continue
+        yield person
 
-        persons.append(person)
-        if limit is not None and len(persons) >= limit:
-            break
 
-    return persons
+def list_profile_person_dicts(
+    search: Optional[str] = None,
+    platform: Optional[str] = None,
+    is_known: Optional[bool] = None,
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """列出画像；有 limit 时只读取足够的匹配项。"""
+    from itertools import islice
+
+    persons = _iter_profile_person_dicts(search, platform, is_known)
+    return list(persons if limit is None else islice(persons, max(0, limit)))
+
+
+def _profile_person_page(
+    search: Optional[str], platform: Optional[str], is_known: Optional[bool], page: int, page_size: int
+) -> tuple[int, List[Dict[str, Any]]]:
+    start = (page - 1) * page_size
+    page_data = []
+    total = 0
+    for person in _iter_profile_person_dicts(search, platform, is_known):
+        if start <= total < start + page_size:
+            page_data.append(person)
+        total += 1
+    return total, page_data
 
 
 def get_profile_person_dict(person_id: str) -> Optional[Dict[str, Any]]:
@@ -323,10 +337,12 @@ def get_profile_person_dict(person_id: str) -> Optional[Dict[str, Any]]:
 
 def get_profile_person_stats() -> Dict[str, Any]:
     """统计新记忆系统画像数量。"""
-    persons = list_profile_person_dicts()
-    platform_counts = Counter(person["platform"] for person in persons)
-    known = sum(1 for person in persons if person["is_known"])
-    total = len(persons)
+    platform_counts = Counter()
+    known = total = 0
+    for person in _iter_profile_person_dicts():
+        platform_counts[person["platform"]] += 1
+        known += bool(person["is_known"])
+        total += 1
     return {
         "total": total,
         "known": known,
@@ -348,11 +364,8 @@ async def get_person_list(
     """获取人物信息列表（来自新记忆系统用户画像）"""
     try:
         verify_auth_token(maibot_session, authorization)
-        persons = list_profile_person_dicts(search=search, platform=platform, is_known=is_known)
-        total = len(persons)
-        start = (page - 1) * page_size
-        end = start + page_size
-        page_data = [PersonInfoResponse(**person) for person in persons[start:end]]
+        total, persons = await run_in_threadpool(_profile_person_page, search, platform, is_known, page, page_size)
+        page_data = [PersonInfoResponse(**person) for person in persons]
         return PersonListResponse(success=True, total=total, page=page, page_size=page_size, data=page_data)
     except HTTPException:
         raise
@@ -365,7 +378,7 @@ async def get_person_stats(maibot_session: Optional[str] = Cookie(None), authori
     """获取人物信息统计数据（来自新记忆系统用户画像）"""
     try:
         verify_auth_token(maibot_session, authorization)
-        return {"success": True, "data": get_profile_person_stats()}
+        return {"success": True, "data": await run_in_threadpool(get_profile_person_stats)}
     except HTTPException:
         raise
     except Exception as e:

@@ -410,7 +410,7 @@ def _detect_image_format(data: bytes) -> str | None:
     return None
 
 
-def _detect_audio_format(data: bytes) -> str | None:
+def detect_audio_format(data: bytes) -> str | None:
     if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WAVE":
         return "wav"
     if data.startswith(b"ID3") or (len(data) >= 2 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0):
@@ -444,7 +444,7 @@ def _decode_trace_media(media: TraceMediaInput, *, max_bytes: int) -> tuple[byte
     if media.kind == "image":
         detected_format = _detect_image_format(data)
     elif media.kind == "audio":
-        detected_format = _detect_audio_format(data)
+        detected_format = detect_audio_format(data)
     else:
         return None
     if detected_format is None:

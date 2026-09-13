@@ -49,7 +49,7 @@ def _is_single_char_jargon(content: str) -> bool:
 def _should_infer_meaning(jargon_obj: Jargon) -> bool:
     """
     判断是否需要进行含义推断
-    在 count 达到 3,6, 10, 20, 40, 60, 100 时进行推断
+    在 count 达到 2, 4, 8, 12, 24, 60, 100 时进行推断
     并且count必须大于last_inference_count，避免重启后重复判定
     如果is_complete为True，不再进行推断
     """
@@ -60,7 +60,7 @@ def _should_infer_meaning(jargon_obj: Jargon) -> bool:
     count = jargon_obj.count or 0
     last_inference = jargon_obj.last_inference_count or 0
 
-    # 阈值列表：3,6, 10, 20, 40, 60, 100
+    # 阈值列表：2, 4, 8, 12, 24, 60, 100
     thresholds = [2, 4, 8, 12, 24, 60, 100]
 
     if count < thresholds[0]:

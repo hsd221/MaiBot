@@ -9,8 +9,9 @@ import asyncio
 import time
 import uuid
 from typing import Dict, Any, Optional, List
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, Depends, Cookie, Header
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, Depends, Cookie, Header, HTTPException
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from src.common.logger import get_logger, hash_id
 from src.common.database.database_model import Messages
@@ -165,6 +166,8 @@ class ChatHistoryManager:
             group_id: 群 ID，默认清空 WebUI 默认聊天室
         """
         target_group_id = group_id if group_id else WEBUI_CHAT_GROUP_ID
+        if target_group_id != WEBUI_CHAT_GROUP_ID and not target_group_id.startswith(VIRTUAL_GROUP_ID_PREFIX):
+            raise HTTPException(status_code=400, detail="只能清空 WebUI 聊天室的历史记录")
         try:
             deleted = Messages.delete().where(Messages.chat_info_group_id == target_group_id).execute()
             logger.info("已清空聊天记录", deleted_count=deleted, group_id_hash=hash_id(target_group_id))
@@ -318,7 +321,7 @@ async def get_chat_history(
 @router.get("/platforms")
 async def get_available_platforms(_auth: bool = Depends(require_auth)):
     """获取可用平台列表（来自新记忆系统用户画像）"""
-    stats = get_profile_person_stats()
+    stats = await run_in_threadpool(get_profile_person_stats)
     platforms = [{"platform": platform, "count": count} for platform, count in stats["platforms"].items()]
     return {"success": True, "platforms": platforms}
 
@@ -331,7 +334,9 @@ async def get_persons_by_platform(
     _auth: bool = Depends(require_auth),
 ):
     """获取指定平台的用户列表（来自新记忆系统用户画像）"""
-    persons = list_profile_person_dicts(search=search, platform=platform, is_known=True, limit=limit)
+    persons = await run_in_threadpool(
+        list_profile_person_dicts, search=search, platform=platform, is_known=True, limit=limit
+    )
     compact_persons = [
         {
             "person_id": person["person_id"],
@@ -443,6 +448,8 @@ async def websocket_chat(
         person = get_profile_person_dict(person_id)
         if person and person["platform"] == platform:
             virtual_group_id = group_id or f"{VIRTUAL_GROUP_ID_PREFIX}{platform}_{person['user_id']}"
+            if not virtual_group_id.startswith(VIRTUAL_GROUP_ID_PREFIX):
+                virtual_group_id = f"{VIRTUAL_GROUP_ID_PREFIX}{virtual_group_id}"
             current_virtual_config = VirtualIdentityConfig(
                 enabled=True,
                 platform=platform,
@@ -660,25 +667,23 @@ async def websocket_chat(
                         )
                         continue
 
-                    # 使用请求中的用户数据（用户画像功能已迁移，不再查询 DB）
-                    # 前端需提供完整的 person_id, platform, user_nickname 等信息
+                    # 与 URL 初始化路径一致：身份由现有画像确定。
                     try:
                         virtual_person_id = _bounded_chat_text(virtual_data.get("person_id"), MAX_CHAT_IDENTITY_CHARS)
                         virtual_platform = _bounded_chat_text(virtual_data.get("platform"), MAX_CHAT_PLATFORM_CHARS)
-                        virtual_user_id = _bounded_chat_text(
-                            virtual_data.get("user_id", virtual_person_id), MAX_CHAT_IDENTITY_CHARS
-                        )
-                        virtual_nickname = _bounded_chat_text(
-                            virtual_data.get("user_nickname", virtual_data.get("nickname", virtual_person_id)),
-                            MAX_CHAT_IDENTITY_CHARS,
-                        )
-                        if not all((virtual_person_id, virtual_platform, virtual_user_id, virtual_nickname)):
-                            raise ValueError("invalid virtual identity fields")
+                        person = get_profile_person_dict(virtual_person_id)
+                        if not person or person["platform"] != virtual_platform:
+                            raise ValueError("virtual identity profile does not match platform")
+                        virtual_person_id = person["person_id"]
+                        virtual_user_id = person["user_id"]
+                        virtual_nickname = person["nickname"] or person["person_name"] or person["user_id"]
 
                         # 生成虚拟群 ID
                         custom_group_id = _bounded_chat_text(virtual_data.get("group_id"), MAX_CHAT_IDENTITY_CHARS)
                         if custom_group_id:
-                            group_id = f"{VIRTUAL_GROUP_ID_PREFIX}{custom_group_id}"
+                            group_id = custom_group_id
+                            if not group_id.startswith(VIRTUAL_GROUP_ID_PREFIX):
+                                group_id = f"{VIRTUAL_GROUP_ID_PREFIX}{group_id}"
                         else:
                             group_id = f"{VIRTUAL_GROUP_ID_PREFIX}{session_id[:8]}"
 

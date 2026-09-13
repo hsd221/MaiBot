@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 
 from .config_base import ConfigBase
 
@@ -22,7 +22,7 @@ class APIProvider(ConfigBase):
     max_retry: int = 2
     """最大重试次数（单个模型API调用失败，最多重试的次数）"""
 
-    timeout: int = 10
+    timeout: int = 60
     """API调用的超时时长（超过这个时长，本次请求将被视为“请求超时”，单位：秒）"""
 
     retry_interval: int = 10
@@ -134,6 +134,8 @@ class ModelTaskConfig(ConfigBase):
 
     def get_task(self, task_name: str) -> TaskConfig:
         """获取指定任务的配置"""
-        if hasattr(self, task_name):
-            return getattr(self, task_name)
+        if task_name in {config_field.name for config_field in fields(self)}:
+            task = getattr(self, task_name)
+            if isinstance(task, TaskConfig):
+                return task
         raise ValueError(f"任务 '{task_name}' 未找到对应的配置")

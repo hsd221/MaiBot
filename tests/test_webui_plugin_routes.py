@@ -2575,13 +2575,13 @@ class InstalledPluginRoutesTest(PluginRouteBase):
         self.assertEqual(plugin_ids, {"Author.Plugin", "LegacyAuthor.LegacyRepo"})
 
         inferred_manifest = json.loads((inferred / "_manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(inferred_manifest["id"], "LegacyAuthor.LegacyRepo")
+        self.assertNotIn("id", inferred_manifest)
 
-    async def test_installed_plugins_creates_missing_plugins_directory(self) -> None:
+    async def test_installed_plugins_leaves_missing_plugins_directory_unmodified(self) -> None:
         result = await plugin_routes.get_installed_plugins(**self.auth_kwargs())
 
         self.assertEqual(result, {"success": True, "plugins": []})
-        self.assertTrue(self.plugins_dir.exists())
+        self.assertFalse(self.plugins_dir.exists())
 
     async def test_installed_plugins_skips_symlinked_or_oversized_manifests_and_hides_absolute_paths(self) -> None:
         valid = self.plugins_dir / "ValidPlugin"

@@ -163,7 +163,7 @@ class RateLimiterTest(unittest.TestCase):
             "src.webui.rate_limiter.global_config",
             SimpleNamespace(webui=SimpleNamespace(trust_xff=True, trusted_proxies="127.0.0.1")),
         ):
-            self.assertEqual(limiter._get_client_ip(fake_request({"X-Forwarded-For": "1.1.1.1, 2.2.2.2"})), "1.1.1.1")
+            self.assertEqual(limiter._get_client_ip(fake_request({"X-Forwarded-For": "1.1.1.1, 2.2.2.2"})), "2.2.2.2")
             self.assertEqual(limiter._get_client_ip(fake_request({"X-Real-IP": "3.3.3.3"})), "3.3.3.3")
         self.assertEqual(limiter._get_client_ip(fake_request(host="4.4.4.4")), "4.4.4.4")
         self.assertEqual(limiter._get_client_ip(SimpleNamespace(headers={}, client=None)), "unknown")
@@ -470,13 +470,13 @@ class AntiCrawlerTest(unittest.IsolatedAsyncioTestCase):
                         host="172.16.0.8",
                     )
                 ),
-                "8.8.8.8",
+                "1.1.1.1",
             )
             self.assertEqual(
                 middleware._get_client_ip(
                     fake_web_request({"X-Forwarded-For": "bad", "X-Real-IP": "9.9.9.9"}, host="172.16.0.8")
                 ),
-                "9.9.9.9",
+                "unknown",
             )
             self.assertEqual(
                 middleware._get_client_ip(fake_web_request({"X-Forwarded-For": "8.8.8.8"}, host="203.0.113.2")),

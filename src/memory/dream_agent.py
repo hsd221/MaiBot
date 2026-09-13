@@ -10,6 +10,8 @@ DreamTask 作为 AsyncTask 子类运行，由 async_task_manager 调度。
 from __future__ import annotations
 
 import datetime
+import asyncio
+from bisect import insort
 import hashlib
 import json
 import re
@@ -1223,37 +1225,36 @@ class DreamTask(AsyncTask):
             return stats
 
         try:
-            with memory_db:
-                atoms = list(
-                    MemoryAtomModel.select()
-                    .where(MemoryAtomModel.status == "active")
-                    .order_by(MemoryAtomModel.last_accessed_at.asc())
-                )
+            counts, candidate_ids = await asyncio.to_thread(self._scan_soft_cap_candidates, archive_limit)
         except Exception as e:
             logger.error(f"梦境软上限扫描失败: {e}")
             return stats
 
-        groups: dict[str, list[MemoryAtomModel]] = {}
-        for atom_model in atoms:
-            entity = self._primary_memory_entity(atom_model)
-            if not entity:
-                continue
-            groups.setdefault(entity, []).append(atom_model)
-
         remaining_archive_budget = archive_limit
-        for entity, entity_atoms in groups.items():
+        for entity, active_count in counts.items():
             if remaining_archive_budget <= 0:
                 break
             try:
                 existing_summary = self._get_soft_cap_summary(entity)
-                active_count = len(entity_atoms)
                 if active_count <= cap:
                     continue
 
+                ids = candidate_ids.get(entity, [])
+                with memory_db:
+                    candidates = list(
+                        MemoryAtomModel.select().where(
+                            MemoryAtomModel.atom_id.in_(ids),
+                            MemoryAtomModel.status == "active",
+                        )
+                    )
+                # The threaded snapshot can be stale: an atom may have been
+                # reassigned or promoted to a protected type while scanning.
                 candidates = [
                     atom
-                    for atom in entity_atoms
-                    if atom.atom_type in SOFT_CAP_MERGEABLE_TYPES and not self._is_soft_cap_summary(atom)
+                    for atom in candidates
+                    if atom.atom_type in SOFT_CAP_MERGEABLE_TYPES
+                    and not self._is_soft_cap_summary(atom)
+                    and self._primary_memory_entity(atom) == entity
                 ]
                 if not candidates:
                     continue
@@ -1293,6 +1294,46 @@ class DreamTask(AsyncTask):
                 f"新建{stats['summaries_created']}条, 更新{stats['summaries_updated']}条"
             )
         return stats
+
+    def _scan_soft_cap_candidates(self, archive_limit: int) -> tuple[dict[str, int], dict[str, list[str]]]:
+        """流式统计全部历史，只保留每个实体本轮可能归档的候选 ID。"""
+        counts: dict[str, int] = {}
+        candidates: dict[str, list[tuple]] = {}
+        with memory_db:
+            query = (
+                MemoryAtomModel.select(
+                    MemoryAtomModel.atom_id,
+                    MemoryAtomModel.atom_type,
+                    MemoryAtomModel.entities,
+                    MemoryAtomModel.source_id,
+                    MemoryAtomModel.source_scene,
+                    MemoryAtomModel.weight,
+                    MemoryAtomModel.last_accessed_at,
+                    MemoryAtomModel.created_at,
+                )
+                .where(MemoryAtomModel.status == "active")
+                .order_by(MemoryAtomModel.last_accessed_at.asc())
+            )
+            for index, atom in enumerate(query.iterator()):
+                entity = self._primary_memory_entity(atom)
+                if not entity:
+                    continue
+                counts[entity] = counts.get(entity, 0) + 1
+                if atom.atom_type not in SOFT_CAP_MERGEABLE_TYPES or self._is_soft_cap_summary(atom):
+                    continue
+                selected = candidates.setdefault(entity, [])
+                insort(
+                    selected,
+                    (
+                        float(atom.weight or 0.0),
+                        atom.last_accessed_at or atom.created_at or datetime.datetime.min,
+                        index,
+                        atom.atom_id,
+                    ),
+                )
+                if len(selected) > archive_limit:
+                    selected.pop()
+        return counts, {entity: [item[-1] for item in items] for entity, items in candidates.items()}
 
     @staticmethod
     def _primary_memory_entity(atom_model: MemoryAtomModel) -> str | None:

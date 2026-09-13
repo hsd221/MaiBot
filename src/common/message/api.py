@@ -6,7 +6,7 @@ import secrets
 from maim_message import MessageServer
 
 from src.common.logger import get_logger, hash_id
-from src.common.server import get_global_server
+from src.common.server import get_global_server, get_server_address
 from src.config.config import global_config
 
 global_api = None
@@ -70,7 +70,7 @@ def get_global_api() -> MessageServer:  # sourcery skip: extract-method
         # 读取配置项
         maim_message_config = global_config.maim_message
         legacy_auth_tokens = _legacy_auth_tokens(maim_message_config)
-        configured_legacy_host = os.environ["HOST"]
+        configured_legacy_host, legacy_port = get_server_address()
         legacy_host = configured_legacy_host
         allow_unauthenticated_legacy = _is_loopback_bind_host(configured_legacy_host) or _env_enabled(
             "MAIBOT_ALLOW_UNAUTHENTICATED_LEGACY_SERVER"
@@ -90,7 +90,7 @@ def get_global_api() -> MessageServer:  # sourcery skip: extract-method
         # 设置基本参数 (Legacy Server Mode)
         kwargs = {
             "host": legacy_host,
-            "port": int(os.environ["PORT"]),
+            "port": legacy_port,
             "app": get_global_server().get_app(),
         }
 

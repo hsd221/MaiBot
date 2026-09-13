@@ -2589,8 +2589,6 @@ async def get_installed_plugins(
     try:
         plugins_dir = _plugins_directory()
         if plugins_dir is None:
-            logger.info("插件目录不存在，创建目录")
-            _plugins_directory(create=True)
             return {"success": True, "plugins": []}
 
         installed_plugins = []
@@ -2649,21 +2647,8 @@ async def get_installed_plugins(
                         plugin_id = folder_name
 
                     plugin_id = validate_plugin_id(plugin_id)
-                    logger.info("已为缺少 ID 的插件清单生成安全 ID")
+                    logger.debug("为缺少 ID 的插件生成兼容展示 ID，不修改清单")
                     manifest["id"] = plugin_id
-                    try:
-                        manifest_content = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
-                        manifest_path = _plugin_file_path(plugin_path, "_manifest.json")
-                        _atomic_write_bytes(
-                            manifest_path,
-                            manifest_content,
-                            MAX_PLUGIN_MANIFEST_BYTES,
-                            "插件清单",
-                        )
-                    except HTTPException:
-                        logger.warning("无法安全写入插件清单 ID")
-                    except OSError as e:
-                        log_exception_type(logger, "写入插件清单 ID 失败", e, level="warning")
 
                 installation_source = _verified_installation_source(
                     plugin_id,

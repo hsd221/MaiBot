@@ -6,7 +6,6 @@ TOML 工具函数
 
 import os
 import re
-import stat
 import tempfile
 from typing import Any
 
@@ -125,8 +124,7 @@ def save_toml_with_format(
     )
     os.close(file_descriptor)
     try:
-        if os.path.exists(target_path):
-            os.chmod(temporary_path, stat.S_IMODE(os.stat(target_path).st_mode))
+        # mkstemp 创建 0600 文件；配置可能含凭据，不继承旧文件的公开读取权限。
         with open(temporary_path, "w", encoding="utf-8") as f:
             f.write(output)
             f.flush()
